@@ -2,9 +2,9 @@
 
 > 项目初始化占位文档（用途与架构待补充）。
 
-## 本地路径
-
-`D:\workspace\myspace\zhaoye`
+- **GitHub**：https://github.com/yuan-aaas/zhaoye-mem
+- **本地路径**：`D:\workspace\myspace\zhaoye`
+- **默认分支**：`main`
 
 ## 快速开始
 
@@ -14,5 +14,14 @@
 
 ```
 zhaoye-mem/
+├── .gitignore
 └── README.md
 ```
+
+## 提交约定
+
+```
+<type>: <summary>
+```
+
+`type` 取 `feat` / `fix` / `docs` / `chore` / `refactor` / `test`。

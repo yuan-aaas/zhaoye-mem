@@ -1,0 +1,9 @@
+{
+  "name": "assistant-dsh",
+  "description": "助手 Agent 的 DSH 适配层：人格、显式记忆与双轨委托",
+  "version": "0.1.0",
+  "entry": {
+    "name": "assistant-dsh",
+    "inject": []
+  }
+}

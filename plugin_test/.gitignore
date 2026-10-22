@@ -1,0 +1,4 @@
+# 过程文件默认不入库，只保留 README 与本文件。
+*
+!.gitignore
+!README.md

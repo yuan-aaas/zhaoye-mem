@@ -1,0 +1,108 @@
+# assistant-dsh bundle patch
+#
+# 一个 Host 行 + 两个 Agent preset：
+#   assistant         助手对话轨（无 fs/shell，只有 assistant_* + ask_user + todo + web_search）
+#   assistant-worker  独立工作会话（由 assistant_delegate 新开，不是子代理）
+- insert:
+    - id: assistant-dsh
+      name: assistant-dsh
+      config:
+        dataRoot: ~/.zhaoye
+        autoInit: true
+        # 可选：把 DSH 会话工作目录映射到 zhaoye-mem 的 project_id
+        # projectMap:
+        #   demo: D:/workspace/myspace/zhaoye
+
+    - id: preset-assistant
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: assistant
+        name: 助手
+        description: 长期工作助手：固定人格、显式记忆与双轨委托
+        order: 30
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: 你是用户的长期工作助手。先理解意图，再决定直接回答、查询记忆或委托工作 Agent。
+          - id: assistant-agent
+            name: assistant-dsh/agent
+          - id: tool-ask-user
+            name: '@deepseek-ai/dsh-tool-ask-user'
+          - id: tool-todo
+            name: '@deepseek-ai/dsh-tool-todo'
+            config:
+              allowParallelInProgress: true
+          - id: tool-web
+            name: '@deepseek-ai/dsh-tool-web'
+            config:
+              fetch: false
+              searchTimeoutMs: 60000
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
+
+    - id: preset-assistant-worker
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: assistant-worker
+        name: 助手工作轨
+        description: 助手新开的独立工作会话，可读写项目文件、运行命令，返回带证据与产物的短回执
+        order: 31
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: 你是一个独立的工作会话。可以读写当前工作目录内文件、运行命令、查资料；不继承主对话人格，不使用记忆工具，不继续委托。完成后返回 JSON 回执。
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+          - id: tool-pwsh
+            name: '@deepseek-ai/dsh-tool-pwsh'
+            disabled: !!js process.platform !== 'win32'
+          - id: tool-bash
+            name: '@deepseek-ai/dsh-tool-bash'
+            disabled: !!js process.platform === 'win32'
+          - id: tool-web
+            name: '@deepseek-ai/dsh-tool-web'
+            config:
+              fetch: true
+              searchTimeoutMs: 60000
+          - id: tool-todo
+            name: '@deepseek-ai/dsh-tool-todo'
+            config:
+              allowParallelInProgress: true
+          - id: worker-guard
+            name: assistant-dsh/worker
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024

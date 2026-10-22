@@ -11,7 +11,22 @@ Desktop.ini
 # ---- Node ----
 node_modules/
 dist/
+plugins/*/lib/
 *.log
+.local-data/
+# 过程文件统一放 plugin_test/，只保留说明与忽略规则
+plugin_test/*
+!plugin_test/README.md
+!plugin_test/.gitignore
+.smoke-data-*/
+.dsh-explore/
+
+# ---- Tool data ----
+.noteboard/
+
+# ---- Local docs ----
+# 方案、评审、追溯文档只保留在本机，不随仓库发布
+docs/
 
 # ---- Python ----
 __pycache__/

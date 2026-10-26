@@ -1,0 +1,49 @@
+# 0001. 单仓多包与多适配器发布形态
+
+- **状态**：已接受
+- **日期**：2026-10-26
+- **决策者**：袁冶、助手
+- **触及章节**：ARCHITECTURE §3.3 §4 §6.3 §11.5 §12 §14.1 §15 §16 §17
+- **落地文档**：[DEVELOPMENT-DESIGN.md](../DEVELOPMENT-DESIGN.md)
+
+## 背景
+
+照夜计划面向多个 AI 工具发布适配插件：DSH（进程内插件）、MCP 客户端（Cursor / Claude Desktop / Cline / Zed）、CLI / sidecar。原架构 v2.0-draft 采用「单包 + 插件子包」，前提是只有一个宿主。
+
+多宿主暴露三个问题：
+
+1. npm 发布物必须「每个宿主一个包」，单包无法表达；
+2. 宿主 SDK 互斥（MCP 包不需要 DSH SDK），单包会把所有 SDK 塞进用户依赖；
+3. 单包最诱人的坏解法是「运行时按宿主 if/else」，平台差异与工具面混杂，最终仍要拆。
+
+## 决策
+
+1. **单仓多包**：一个 git 仓库、一个 `pnpm-lock.yaml`、一套根配置；用 pnpm workspaces，**不用 Nx**。
+2. **包清单（8 个）**：`packages/{contracts,storage,core,app,adapter-kit,cli}` + `plugins/{dsh,mcp}`。
+   依赖单向：`plugins → app → core → storage → contracts`；`plugins` 和 `cli` 还可依赖 `adapter-kit`，`adapter-kit → contracts`；`app` 不依赖 `adapter-kit`。
+3. **统一版本**：所有包同一版本号一起发布，降低「插件 N 配 core M」的兼容矩阵。
+4. **单发布单元**：`packages/*` 不单独发布；发布时把 `@zhaoye/*` bundle 进插件，用户侧不解析内部包。
+5. **适配器门槛**：每个插件声明 `AdapterManifest` 并通过 `tests/adapter-conformance`，未通过不算落地。
+6. **presence 适配多门**：插件内提供 handoff；空闲超时默认开（15 分钟、无进行中任务才释放）；`owner.json` 增加 `instance_id`，处理同进程重复 open。
+
+## 后果
+
+- 构建复杂度上升：`pnpm -r build` 按依赖拓扑执行，由 workspace 协议保证顺序。
+- 必须用 dependency-cruiser 守包边界，否则多包会退化成「一个仓库里的几份复制」。
+- 发布需要 bundle 步骤（esbuild），不能直接发布原始包。
+- 新增宿主只加 `plugins/<host>/`，core 一行不改——这是本决策要买的核心收益。
+
+## 被否决的方案
+
+| 方案 | 否决理由 |
+|---|---|
+| 单包 + 运行时 if/else | 依赖里同时出现多个宿主 SDK；平台差异与工具面混杂；最终仍要拆 |
+| 多 git 仓库 | 一体化代码分叉；旧系统 `prompt.ts` / `receipt.ts` 在插件里各复制一份（§11.2 修的就是这个） |
+| 直接把 `@zhaoye/core` 发到 npm 让插件依赖 | 用户侧多一层解析；版本错配风险；同进程可能出现两份 core（单例变两个） |
+
+## 验证
+
+- 从无 `dist/` 的干净检出按 README 安装后，`pnpm verify` 全绿（build / typecheck / lint / arch / test）。
+- 故意在 `plugins/dsh` 里 `import '@zhaoye/core'` → dependency-cruiser 必须报错。
+- 已声明的 DSH/MCP SDK 导入与包内测试导入通过规则正例；跨插件和跨包 `src/internal/` 导入被拒绝。
+- 新增一个空适配器 `plugins/fake`，用最小实现通过 conformance 套件。

@@ -1,0 +1,24 @@
+{
+  "name": "@zhaoye/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "zhaoye": "./dist/bin.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && tsc -p tsconfig.test.json",
+    "typecheck": "tsc -p tsconfig.build.json --noEmit && tsc -p tsconfig.test.json --noEmit"
+  },
+  "dependencies": {
+    "@zhaoye/adapter-kit": "workspace:*",
+    "@zhaoye/app": "workspace:*",
+    "@zhaoye/contracts": "workspace:*"
+  }
+}

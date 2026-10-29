@@ -1,0 +1,17 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@zhaoye/contracts": ["packages/contracts/src/index.ts"],
+      "@zhaoye/storage": ["packages/storage/src/index.ts"],
+      "@zhaoye/core": ["packages/core/src/index.ts"],
+      "@zhaoye/app": ["packages/app/src/index.ts"],
+      "@zhaoye/adapter-kit": ["packages/adapter-kit/src/index.ts"],
+      "@zhaoye/cli": ["packages/cli/src/index.ts"],
+      "dsh-plugin-zhaoye": ["plugins/dsh/src/index.ts"],
+      "@zhaoye/mcp": ["plugins/mcp/src/index.ts"]
+    }
+  },
+  "include": ["packages/*/src/**/*.ts", "plugins/*/src/**/*.ts"]
+}

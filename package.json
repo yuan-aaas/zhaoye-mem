@@ -1,0 +1,26 @@
+{
+  "name": "zhaoye",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.7.0",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "scripts": {
+    "build": "pnpm -r run build && tsc -p tests/tsconfig.json",
+    "typecheck": "pnpm -r run typecheck",
+    "lint": "biome check .",
+    "arch": "depcruise --config .dependency-cruiser.cjs packages plugins",
+    "test": "node scripts/run-tests.mjs",
+    "check:versions": "node scripts/check-versions.mjs",
+    "verify": "pnpm check:versions && pnpm build && pnpm typecheck && pnpm lint && pnpm arch && pnpm test"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.6.2",
+    "@types/node": "^24.10.1",
+    "dependency-cruiser": "^16.10.4",
+    "esbuild": "^0.25.10",
+    "typescript": "5.9.3"
+  }
+}

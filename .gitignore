@@ -1,0 +1,21 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# build output
+**/dist/
+**/dist-test/
+tests-dist/
+*.tsbuildinfo
+*.tsbuildinfo.*
+
+# local runtime / tooling state
+.tmp/
+coverage/
+.idea/
+.vscode/
+
+# OS noise
+.DS_Store
+Thumbs.db
+desktop.ini

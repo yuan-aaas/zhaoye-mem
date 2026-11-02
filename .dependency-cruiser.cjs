@@ -1,5 +1,5 @@
 // 包名解析由 tsconfig.arch.json 的 paths 指向各包 src，避免 dist 被排除后规则只看到裸包名。
-// T0 阶段插件规则对 node_modules 全放开；选定真实宿主 SDK 后收紧为按插件白名单（DEVELOPMENT-DESIGN §2.3）。
+// T0 阶段插件规则对 node_modules 全放开；选定真实宿主 SDK 后收紧为按插件白名单（见 docs/02-工程与里程碑.md §3）。
 const packageNames = ['contracts', 'storage', 'core', 'app', 'adapter-kit', 'cli'];
 const pluginNames = ['dsh', 'mcp'];
 const packageRoots = [

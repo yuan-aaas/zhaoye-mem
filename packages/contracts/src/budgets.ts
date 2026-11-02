@@ -10,7 +10,6 @@ export const BUDGETS = {
   fixedInjectionCodePoints: 2800,
   toolResultCodePoints: 1000,
   receiptSummaryCodePoints: 600,
-  journalEventBytes: 64 * 1024,
   localWorkerReadLines: 200,
   localWorkerReadCodePoints: 6000,
   modelRequestTokens: 8000,

@@ -26,6 +26,12 @@ const forbidden = [
     to: { path: '^packages/(core|app|adapter-kit|cli)/|^plugins/' },
   },
   {
+    name: 'core-contracts-only',
+    severity: 'error',
+    from: { path: '^packages/core/src/' },
+    to: { pathNot: '^packages/(core|contracts)/' },
+  },
+  {
     name: 'core-no-fs',
     severity: 'error',
     from: { path: '^packages/core/src/' },

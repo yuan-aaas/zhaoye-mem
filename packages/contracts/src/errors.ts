@@ -1,41 +1,32 @@
-import { z } from 'zod';
-
-export const ERROR_CODES = [
-  'ASSISTANT_PRESENT_ELSEWHERE',
-  'ASSISTANT_SAME_PROCESS',
-  'LOCKED',
-  'CORRUPT_DATA',
-  'COMMIT_UNKNOWN',
-  'CONFLICT',
-  'BUDGET_EXCEEDED',
-  'MAINTENANCE_REQUIRED',
-  'SCHEMA_MIGRATION_REQUIRED',
-  'UNAUTHORIZED',
-  'OUT_OF_SCOPE',
-  'NOT_FOUND',
-  'SESSION_CONTROLLER_UNAVAILABLE',
-] as const;
-
-export const ErrorCodeSchema = z.enum(ERROR_CODES);
-export type ErrorCode = z.infer<typeof ErrorCodeSchema>;
-
-export const RETRY_ADVICES = ['never', 'safe', 'after_reconcile'] as const;
-export type RetryAdvice = (typeof RETRY_ADVICES)[number];
-
-export const ACTION_KINDS = [
-  'run_doctor',
-  'release_presence',
-  'takeover',
-  'retry_later',
-  'reinit',
-  'restore_backup',
-] as const;
-export type ActionKind = (typeof ACTION_KINDS)[number];
-
-export interface AssistantError {
-  code: ErrorCode;
-  message: string;
-  retry: RetryAdvice;
-  action?: ActionKind;
-  details?: unknown;
+export const ERROR_POLICY = {
+  INVALID_INPUT: ['never', null],
+  UNAUTHORIZED: ['never', null],
+  OUT_OF_SCOPE: ['never', null],
+  NOT_FOUND: ['never', null],
+  CONFLICT: ['after_reconcile', 'run_doctor'],
+  CORRUPT_DATA: ['never', 'restore_backup'],
+  STORAGE_FAILURE: ['safe', 'run_doctor'],
+  COMMIT_UNKNOWN: ['after_reconcile', 'run_doctor'],
+  INTEGRITY_FAILED: ['never', 'restore_backup'],
+  IMPORT_INCOMPLETE: ['safe', 'retry_later'],
+  SOURCE_UNAVAILABLE: ['safe', 'retry_later'],
+  SCHEMA_MIGRATION_REQUIRED: ['never', 'reinit'],
+  BUDGET_EXCEEDED: ['never', null],
+  ASSISTANT_PRESENT_ELSEWHERE: ['safe', 'release_presence'],
+  ASSISTANT_SAME_PROCESS: ['never', 'release_presence'],
+  LOCKED: ['safe', 'retry_later'],
+} as const;
+export type ErrorCode = keyof typeof ERROR_POLICY;
+export class ZhaoyeError extends Error {
+  readonly retry;
+  readonly action;
+  constructor(
+    readonly code: ErrorCode,
+    message: string,
+    readonly details: Record<string, unknown> = {},
+  ) {
+    super(message);
+    this.name = 'ZhaoyeError';
+    [this.retry, this.action] = ERROR_POLICY[code];
+  }
 }

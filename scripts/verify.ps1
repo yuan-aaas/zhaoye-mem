@@ -53,6 +53,7 @@ try {
   Invoke-Checked 'Lint' { & $biome 'check' '.' }
   Invoke-Checked 'Architecture' { & $depcruise '--config' '.dependency-cruiser.cjs' 'packages' 'plugins' }
   Invoke-Checked 'Tests' { & $node 'scripts/run-tests.mjs' }
+  Invoke-Checked 'Cross-process acceptance' { & (Join-Path $PSScriptRoot 'test-process.ps1') }
 } finally {
   Pop-Location
 }

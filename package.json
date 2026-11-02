@@ -12,7 +12,7 @@
     "typecheck": "pnpm -r run typecheck",
     "lint": "biome check .",
     "arch": "depcruise --config .dependency-cruiser.cjs packages plugins",
-    "test": "node scripts/run-tests.mjs",
+    "test": "node scripts/run-tests.mjs && pwsh -NoProfile -File scripts/test-process.ps1",
     "check:versions": "node scripts/check-versions.mjs",
     "verify": "pnpm check:versions && pnpm build && pnpm typecheck && pnpm lint && pnpm arch && pnpm test"
   },

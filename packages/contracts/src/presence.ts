@@ -1,16 +1,19 @@
-/**
- * `presence/owner.json` 的公开投影。
- * 字段与 ARCHITECTURE §6.3 的 owner.json 示例保持一致。
- */
-export interface OwnerInfo {
-  host: string;
-  host_name: string;
-  pid: number;
-  instance_id: string;
-  session_id?: string;
-  started_at: string;
-  heartbeat_at: string;
-  heartbeat_interval_ms: number;
-  assistant_id: string;
-  adapter_version: string;
-}
+import { z } from 'zod';
+export const OwnerInfoSchema = z.strictObject({
+  state: z.literal('active'),
+  host: z.string().min(1),
+  host_name: z.string().min(1),
+  pid: z.number().int().positive(),
+  instance_id: z.uuid(),
+  session_id: z.string().optional(),
+  started_at: z.iso.datetime({ offset: true }),
+  heartbeat_at: z.iso.datetime({ offset: true }),
+  heartbeat_interval_ms: z.number().int().positive(),
+  assistant_id: z.uuid(),
+  adapter_version: z.string(),
+});
+export type OwnerInfo = z.infer<typeof OwnerInfoSchema>;
+export type PresenceState =
+  | { status: 'acquired' | 'reentered'; owner: OwnerInfo }
+  | { status: 'taken_over'; owner: OwnerInfo; previous: OwnerInfo }
+  | { status: 'blocked'; owner: OwnerInfo; reason: 'same_process' | 'alive' };

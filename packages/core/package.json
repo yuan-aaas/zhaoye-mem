@@ -14,7 +14,6 @@
     "typecheck": "tsc -p tsconfig.build.json --noEmit && tsc -p tsconfig.test.json --noEmit"
   },
   "dependencies": {
-    "@zhaoye/contracts": "workspace:*",
-    "@zhaoye/storage": "workspace:*"
+    "@zhaoye/contracts": "workspace:*"
   }
 }

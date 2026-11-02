@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@zhaoye/contracts": "workspace:*",
-    "@zhaoye/core": "workspace:*"
+    "@zhaoye/core": "workspace:*",
+    "@zhaoye/storage": "workspace:*"
   }
 }

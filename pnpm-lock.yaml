@@ -38,6 +38,9 @@ importers:
       '@zhaoye/core':
         specifier: workspace:*
         version: link:../core
+      '@zhaoye/storage':
+        specifier: workspace:*
+        version: link:../storage
 
   packages/cli:
     dependencies:
@@ -62,9 +65,6 @@ importers:
       '@zhaoye/contracts':
         specifier: workspace:*
         version: link:../contracts
-      '@zhaoye/storage':
-        specifier: workspace:*
-        version: link:../storage
 
   packages/storage:
     dependencies:

@@ -1,11 +1,11 @@
-import { readdir } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { access, readdir } from 'node:fs/promises';
+import { join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const testFiles = [];
 
-async function collectTests(directory) {
+async function collectTests(directory, sourceRoot, outputRoot) {
   let entries;
   try {
     entries = await readdir(directory, { withFileTypes: true });
@@ -17,9 +17,11 @@ async function collectTests(directory) {
   for (const entry of entries) {
     const path = join(directory, entry.name);
     if (entry.isDirectory()) {
-      await collectTests(path);
-    } else if (entry.isFile() && entry.name.endsWith('.test.js')) {
-      testFiles.push(path);
+      await collectTests(path, sourceRoot, outputRoot);
+    } else if (entry.isFile() && entry.name.endsWith('.test.ts')) {
+      const compiled = join(outputRoot, relative(sourceRoot, path).replace(/\.ts$/, '.js'));
+      await access(compiled);
+      testFiles.push(compiled);
     }
   }
 }
@@ -27,11 +29,14 @@ async function collectTests(directory) {
 for (const rootDirectory of ['packages', 'plugins']) {
   const parent = resolve(root, rootDirectory);
   for (const entry of await readdir(parent, { withFileTypes: true })) {
-    if (entry.isDirectory()) await collectTests(resolve(parent, entry.name, 'dist-test'));
+    if (entry.isDirectory()) {
+      const source = resolve(parent, entry.name, 'test');
+      await collectTests(source, source, resolve(parent, entry.name, 'dist-test'));
+    }
   }
 }
 
-await collectTests(resolve(root, 'tests-dist'));
+await collectTests(resolve(root, 'tests'), resolve(root, 'tests'), resolve(root, 'tests-dist'));
 testFiles.sort();
 
 if (testFiles.length === 0) {

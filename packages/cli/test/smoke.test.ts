@@ -6,11 +6,8 @@ test('cli public entry is available', () => {
   assert.equal(packageName, '@zhaoye/cli');
 });
 
-test('cli reports its version flag', () => {
+test('cli reports its version flag', async () => {
   const output: string[] = [];
-  assert.equal(
-    run(['--version'], (line) => output.push(line)),
-    0,
-  );
+  assert.equal(await run(['--version'], (line) => output.push(line)), 0);
   assert.deepEqual(output, ['0.1.0']);
 });

@@ -63,6 +63,7 @@ export async function createZhaoye(config: ZhaoyeConfig) {
   let closed = false;
   let lost: unknown;
   let closing: Promise<void> | undefined;
+  let released = false;
   const assertOpen = () => {
     if (closed) throw new ZhaoyeError('CONFLICT', '实例已关闭');
     if (lost)
@@ -115,12 +116,20 @@ export async function createZhaoye(config: ZhaoyeConfig) {
     presence: () => presence.read(),
     doctor: () => doctor(root),
     close: (): Promise<void> => {
+      if (released) return Promise.resolve();
       if (closing) return closing;
       closed = true;
       clearInterval(timer);
       closing = Promise.allSettled([...inFlight])
         .then(() => heartbeat)
-        .then(() => presence.release(instanceId));
+        .then(async () => {
+          // A previous attempt may have removed owner.json before a later I/O failure.
+          if (await presence.read()) await presence.release(instanceId);
+          released = true;
+        })
+        .finally(() => {
+          closing = undefined;
+        });
       return closing;
     },
   };

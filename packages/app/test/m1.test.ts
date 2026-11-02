@@ -338,3 +338,77 @@ test('close drains in-flight operations before releasing the data root', async (
     await reopened.close();
   }
 });
+for (const mode of ['missing', 'empty', 'lost-prefix'] as const) {
+  test(`WB-02 ${mode} version index blocks commits without altering identity or historical snapshots`, async (t) => {
+    const { app, ctx, root } = await fixture(t);
+    await app.identity.commit(request(), ctx);
+    const file = join(root, 'identity/versions/index.jsonl');
+    const original = await readFile(file, 'utf8');
+    const before = (await app.identity.read(ctx)).file_hash;
+    const initialSnapshot = await readFile(
+      join(root, 'identity/versions/000000000001.json'),
+      'utf8',
+    );
+    if (mode === 'missing') await unlink(file);
+    else await writeFile(file, mode === 'empty' ? '' : original.split('\n').slice(1).join('\n'));
+    await assert.rejects(
+      app.identity.commit(request(2, { section: 'user_profile', display_name: 'blocked' }), ctx),
+      { code: 'CORRUPT_DATA' },
+    );
+    await assert.rejects(app.identity.listVersions(ctx), { code: 'CORRUPT_DATA' });
+    assert.equal((await app.identity.read(ctx)).file_hash, before);
+    assert.equal(
+      await readFile(join(root, 'identity/versions/000000000001.json'), 'utf8'),
+      initialSnapshot,
+    );
+    assert.equal(
+      (await doctor(root)).checks.some((c) => c.status === 'fail'),
+      true,
+    );
+    await writeFile(file, original);
+    await app.identity.commit(
+      request(2, { section: 'user_profile', display_name: 'recovered' }),
+      ctx,
+    );
+    assert.deepEqual(
+      (await app.identity.listVersions(ctx)).map((v) => v.revision),
+      [3, 2, 1],
+    );
+  });
+}
+test('WB-03 concurrent close calls share an attempt; transient failure can be retried without reopening writes', async (t) => {
+  const { app, ctx, root } = await fixture(t);
+  const lock = join(root, 'presence/.tmp-presence-lock');
+  await writeFile(lock, JSON.stringify({ pid: process.pid }));
+  const first = app.close();
+  const concurrent = app.close();
+  assert.equal(concurrent, first);
+  await assert.rejects(first, { code: 'LOCKED' });
+  assert.ok(await app.presence());
+  await assert.rejects(app.identity.read(ctx), { code: 'CONFLICT' });
+  await unlink(lock);
+  const retry = app.close();
+  assert.notEqual(retry, first);
+  await retry;
+  await app.close();
+  assert.equal(await app.presence(), null);
+  const reopened = await createZhaoye({ dataRoot: root, host, initIfMissing: false });
+  await reopened.close();
+});
+test('WB-04 invalid complete receipt tail is rejected before the authoritative commit', async (t) => {
+  const { app, ctx, root } = await fixture(t);
+  await app.identity.commit(request(), ctx);
+  const log = join(root, 'identity/operations.jsonl'),
+    before = (await app.identity.read(ctx)).file_hash;
+  const original = await readFile(log, 'utf8');
+  await writeFile(log, `${original}{}`);
+  await assert.rejects(
+    app.identity.commit(request(2, { section: 'user_profile', display_name: 'blocked' }), ctx),
+    { code: 'CORRUPT_DATA' },
+  );
+  assert.equal((await app.identity.read(ctx)).file_hash, before);
+  assert.equal(await readFile(log, 'utf8'), `${original}{}`);
+  await writeFile(log, original);
+  await app.identity.commit(request(2, { section: 'user_profile', display_name: 'allowed' }), ctx);
+  await app.identity.commit(request(3, { section: 'user_profile', display_name: 'again' }), ctx);
+});

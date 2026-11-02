@@ -13,7 +13,7 @@ import {
   serializeIdentityDocument,
   ZhaoyeError,
 } from '@zhaoye/contracts';
-import { hashBytes, ioError, isMissing, readJson, readText, writeAtomic } from './atomic-fs.js';
+import { hashBytes, ioError, isMissing, readText, writeAtomic } from './atomic-fs.js';
 import { createMutex } from './internal/mutex.js';
 import { appendOperation, readLines } from './operations-log.js';
 export type FaultPoint =
@@ -21,7 +21,9 @@ export type FaultPoint =
   | 'after_identity'
   | 'version'
   | 'operation'
-  | 'projection';
+  | 'projection'
+  | 'after_identity_read'
+  | 'after_version_read';
 export function openIdentityStore(
   root: string,
   options: {
@@ -34,13 +36,36 @@ export function openIdentityStore(
     index = join(dir, 'versions/index.jsonl'),
     log = join(dir, 'operations.jsonl');
   const mutex = createMutex();
-  const versions = () => readLines(index, IdentityVersionRefSchema);
+  async function versions() {
+    const entries = await readLines(index, IdentityVersionRefSchema);
+    // The index is mandatory; unlike bounded receipts, missing history is not an empty history.
+    if (
+      entries[0]?.revision !== 1 ||
+      entries.some((entry, i) => i > 0 && entry.revision <= (entries[i - 1]?.revision ?? 0))
+    ) {
+      throw new ZhaoyeError('CORRUPT_DATA', '版本索引缺失、为空或顺序非法，需显式核对恢复', {
+        path: index,
+      });
+    }
+    return entries;
+  }
   const versionPath = (rev: number) => `identity/versions/${String(rev).padStart(12, '0')}.json`;
+  function parseIdentity(raw: string, path: string) {
+    try {
+      return IdentityDocumentSchema.parse(JSON.parse(raw));
+    } catch (e) {
+      throw new ZhaoyeError('CORRUPT_DATA', '身份文件解析失败或不符合契约', {
+        path,
+        cause: String(e),
+      });
+    }
+  }
   async function read() {
     const raw = await readText(file);
     if (raw === null || Buffer.byteLength(raw) > LIMITS.identityBytes)
       throw new ZhaoyeError('CORRUPT_DATA', '身份文件缺失或超限', { path: file });
-    const document = await readJson(file, IdentityDocumentSchema);
+    await options.fault?.('after_identity_read');
+    const document = parseIdentity(raw, file);
     return { document, fileHash: hashBytes(raw), bytes: Buffer.byteLength(raw) };
   }
   async function findOperation(operationId: string) {
@@ -136,7 +161,7 @@ export function openIdentityStore(
       };
       try {
         await options.fault?.('operation');
-        await appendOperation(log, operation);
+        await appendOperation(log, operation, StoredOperationSchema);
       } catch (e) {
         throw new ZhaoyeError('COMMIT_UNKNOWN', '身份已提交但幂等回执未持久化', {
           path: file,
@@ -159,7 +184,7 @@ export function openIdentityStore(
         warnings.push('version_index_failed');
         // Receipt already persisted: update it so retries return the same warnings.
         try {
-          await appendOperation(log, operation);
+          await appendOperation(log, operation, StoredOperationSchema);
         } catch {
           /* doctor detects index drift */
         }
@@ -191,7 +216,8 @@ export function openIdentityStore(
       const raw = await readText(path);
       if (raw === null || hashBytes(raw) !== entry.document_hash)
         throw new ZhaoyeError('CORRUPT_DATA', '历史快照缺失或摘要不符', { path });
-      return readJson(path, IdentityDocumentSchema);
+      await options.fault?.('after_version_read');
+      return parseIdentity(raw, path);
     },
     readProjection: () => readText(join(dir, 'identity.md')),
   };

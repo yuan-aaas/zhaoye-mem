@@ -4,11 +4,17 @@ import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { type TestContext, test } from 'node:test';
-import { createDefaultIdentity, type OwnerInfo, StoredOperationSchema } from '@zhaoye/contracts';
+import {
+  createDefaultIdentity,
+  type OwnerInfo,
+  StoredOperationSchema,
+  serializeIdentityDocument,
+} from '@zhaoye/contracts';
 import {
   appendOperation,
   createPresence,
   ensureDataRoot,
+  hashBytes,
   openDataRoot,
   openIdentityStore,
   readJson,
@@ -186,4 +192,68 @@ test('non-directory data root returns structured storage error', async (t) => {
     { code: 'STORAGE_FAILURE' },
   );
   assert.equal(await readFile(file, 'utf8'), 'keep');
+});
+test('WB-01 identity and version reads parse exactly the bytes whose hash was checked', async (t) => {
+  const p = await root(t);
+  const opened = await ensureDataRoot(p, clock, () => '');
+  const before = createDefaultIdentity(opened.manifest.assistant_id, clock.now().toISOString());
+  const newer = {
+    ...before,
+    revision: 2,
+    user_profile: { ...before.user_profile, display_name: 'new' },
+  };
+  const newerBytes = serializeIdentityDocument(newer);
+  let identityChanged = false,
+    versionChanged = false;
+  const store = openIdentityStore(p, {
+    fault: async (point) => {
+      if (point === 'after_identity_read' && !identityChanged) {
+        identityChanged = true;
+        await writeAtomic(join(p, 'identity/identity.json'), newerBytes);
+      }
+      if (point === 'after_version_read' && !versionChanged) {
+        versionChanged = true;
+        await writeAtomic(join(p, 'identity/versions/000000000001.json'), newerBytes);
+      }
+    },
+  });
+  const snapshot = await store.read();
+  assert.equal(snapshot.document.revision, 1);
+  assert.equal(snapshot.fileHash, hashBytes(serializeIdentityDocument(snapshot.document)));
+  const historical = await store.readVersion(1);
+  assert.deepEqual(historical, before);
+  assert.equal(JSON.parse(await readFile(join(p, 'identity/identity.json'), 'utf8')).revision, 2);
+});
+test('WB-04 complete schema-invalid tail and malformed JSON are never discarded', async (t) => {
+  const p = await root(t),
+    file = join(p, 'lines');
+  const schema = {
+    parse: (v: unknown) => {
+      if (typeof v !== 'number') throw new Error('number required');
+      return v;
+    },
+  };
+  for (const tail of ['{}', '{}\n', '{oops}', '01', '"\\q"']) {
+    const raw = `1\n${tail}`;
+    await writeFile(file, raw);
+    await assert.rejects(readLines(file, schema, true), { code: 'CORRUPT_DATA' });
+    await assert.rejects(appendOperation(file, 2, schema), { code: 'CORRUPT_DATA' });
+    assert.equal(await readFile(file, 'utf8'), raw);
+  }
+});
+test('WB-04 all truncated prefixes of a valid JSON record recover and remain readable after append', async (t) => {
+  const p = await root(t),
+    file = join(p, 'lines');
+  const schema = { parse: (v: unknown) => v };
+  const line = JSON.stringify({
+    id: 'a',
+    text: 'quote " and backslash \\ 中文',
+    values: [true, false, null, 1.2e-8],
+  });
+  for (let i = 1; i < line.length; i++) {
+    await writeFile(file, `1\n${line.slice(0, i)}`);
+    assert.deepEqual(await readLines(file, schema, true), [1]);
+    await appendOperation(file, 2, schema);
+    assert.deepEqual(await readLines(file, schema, true), [1, 2]);
+  }
 });

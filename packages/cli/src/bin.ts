@@ -8,6 +8,7 @@ import {
   type IdentityRollbackRequest,
   ZhaoyeError,
 } from '@zhaoye/contracts';
+import { cliHost, runBackup } from './backup.js';
 export async function run(
   args: string[] = process.argv.slice(2),
   write: (line: string) => void = (line) => process.stdout.write(`${line}\n`),
@@ -33,6 +34,10 @@ export async function run(
     return 2;
   };
   try {
+    if (args[0] === 'backup') {
+      output(await runBackup(args.slice(1)));
+      return 0;
+    }
     if (args.length === 1 && args[0] === '--version') {
       const manifest = JSON.parse(
         await readFile(new URL('../package.json', import.meta.url), 'utf8'),
@@ -73,7 +78,7 @@ export async function run(
     }
     if (command !== 'init' && command !== 'identity') {
       return usage(
-        'Usage: zhaoye init | doctor | identity show/history/apply/rollback | presence [--data-root path] [--json]',
+        'Usage: zhaoye init | doctor | identity show/history/apply/rollback | presence | backup [--data-root path] [--json]',
       );
     }
     if (command === 'init' && (positional.length !== 1 || dry || release)) {
@@ -100,13 +105,7 @@ export async function run(
     }
     const app = await createZhaoye({
       ...(dataRoot ? { dataRoot } : {}),
-      host: {
-        host_id: 'cli',
-        display_name: 'CLI',
-        capabilities: ['tools', 'approval'],
-        adapter_version: '0.1.0',
-        data_schema: 1,
-      },
+      host: cliHost,
       initIfMissing: command === 'init',
     });
     try {

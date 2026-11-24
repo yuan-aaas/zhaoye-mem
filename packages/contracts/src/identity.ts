@@ -146,6 +146,10 @@ export const ActorContextSchema = z.strictObject({
   scope_id: uuid,
   granted_project_ids: z.union([z.literal('*'), z.array(id)]),
   granted_source_ids: z.union([z.literal('*'), z.array(id)]),
+  backup_import: z.boolean().optional(),
+  backup_unassigned: z.boolean().optional(),
+  backup_history: z.boolean().optional(),
+  backup_export: z.boolean().optional(),
 });
 export const DataManifestSchema = z.strictObject({
   format: z.literal('zhaoye-data'),

@@ -14,6 +14,7 @@ import {
   openDataRoot,
   openIdentityStore,
 } from '@zhaoye/storage';
+import { createBackupFacade } from './backup.js';
 import { doctor } from './doctor.js';
 export const packageName = '@zhaoye/app' as const;
 export { renderIdentityMarkdown } from '@zhaoye/core';
@@ -101,6 +102,7 @@ export async function createZhaoye(config: ZhaoyeConfig) {
     rollbackKernel: track(service.rollbackKernel),
     listVersions: track(service.listVersions),
   };
+  const backup = createBackupFacade(root, manifest.assistant_id, config.host.host_id, assertOwner);
   let heartbeat: Promise<void> = Promise.resolve();
   const timer = setInterval(() => {
     heartbeat = presence.heartbeat(instanceId).catch((e) => {
@@ -113,6 +115,15 @@ export async function createZhaoye(config: ZhaoyeConfig) {
     dataRoot: root,
     created,
     identity,
+    backup: {
+      registerMneme: track(backup.registerMneme),
+      importSnapshot: track(backup.importSnapshot),
+      listImportBatches: track(backup.listImportBatches),
+      searchBackup: track(backup.searchBackup),
+      getBackupRecord: track(backup.getBackupRecord),
+      exportMneme: track(backup.exportMneme),
+      verifyBackup: track(backup.verifyBackup),
+    },
     presence: () => presence.read(),
     doctor: () => doctor(root),
     close: (): Promise<void> => {

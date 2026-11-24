@@ -25,6 +25,7 @@ import {
   fileDigest,
   readBackupManifest,
 } from './internal/backup-artifacts.js';
+import { listBackupBatches, readBackupRecords, searchBackupRows } from './internal/backup-query.js';
 import { BACKUP_SCHEMA, BACKUP_SCHEMA_VERSION } from './internal/backup-schema.js';
 
 interface BatchRow {
@@ -81,6 +82,15 @@ function transaction<T>(db: DatabaseSync, work: () => T): T {
       // Best effort.
     }
     throw error;
+  }
+}
+
+function readTransaction<T>(db: DatabaseSync, work: () => T): T {
+  db.exec('BEGIN');
+  try {
+    return work();
+  } finally {
+    db.exec('ROLLBACK');
   }
 }
 
@@ -611,6 +621,22 @@ export async function openBackupDb(
 
   return {
     registerSource,
+    getSource: (sourceId) =>
+      run(() => {
+        const row = db.prepare('SELECT * FROM backup_sources WHERE source_id=?').get(sourceId);
+        if (!row) return null;
+        try {
+          return BackupSourceSchema.parse({
+            sourceId: row.source_id,
+            kind: row.source_kind,
+            scopeId: row.scope_id,
+            displayName: row.display_name,
+            policy: JSON.parse(row.policy_json as string),
+          });
+        } catch {
+          throw new ZhaoyeError('CORRUPT_DATA', '备份来源配置损坏');
+        }
+      }),
     startBatch,
     publishBatch,
     failBatch: (batchId, reason) => write(() => failRunningBatch(findBatch(db, batchId), reason)),
@@ -624,6 +650,11 @@ export async function openBackupDb(
         return rows.length;
       }),
     getCompleteBatch: (sourceId, scopeKey) => run(() => completeBatch(db, sourceId, scopeKey)),
+    listBatches: (access) => run(() => listBackupBatches(db, access)),
+    readRecords: (access, recordId) =>
+      run(() => readTransaction(db, () => readBackupRecords(db, access, recordId))),
+    search: (access, input) =>
+      run(() => readTransaction(db, () => searchBackupRows(db, access, input))),
     rebuildIndex: () =>
       write(() =>
         db.exec(`

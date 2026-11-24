@@ -3,6 +3,7 @@ import { renderIdentityMarkdown } from '@zhaoye/core';
 import {
   createPresence,
   isStale,
+  openBackupDb,
   openDataRoot,
   openIdentityStore,
   pidAlive,
@@ -71,6 +72,15 @@ export async function doctor(dataRoot?: string): Promise<DoctorReport> {
         );
     } else await store.findOperation('');
     check('history', 'ok', '已检查快照与操作记录');
+    try {
+      const backup = await openBackupDb(root);
+      backup.close();
+      check('backup', 'ok', 'SQLite 备份库可打开');
+    } catch (e) {
+      if (e instanceof ZhaoyeError && e.code === 'NOT_FOUND')
+        check('backup', 'ok', '备份库尚未初始化');
+      else check('backup', 'fail', e instanceof ZhaoyeError ? e.code : String(e));
+    }
   } catch (e) {
     check('data', 'fail', e instanceof ZhaoyeError ? `${e.code}: ${e.message}` : String(e));
   }

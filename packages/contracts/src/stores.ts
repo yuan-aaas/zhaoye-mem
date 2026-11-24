@@ -1,10 +1,38 @@
 import type {
+  BackupAccess,
+  BackupBatchReceipt,
+  BackupBatchState,
+  BackupSearchCriteria,
+  BackupSource,
+  PublishBackupBatch,
+  StartBackupBatch,
+} from './backup.js';
+import type {
   IdentityCommitReceipt,
   IdentityDocument,
   IdentityVersionRef,
   StoredOperation,
 } from './identity.js';
 import type { OwnerInfo, PresenceState } from './presence.js';
+import type { BackupBatchSummary, BackupDetail, BackupResult } from './query.js';
+
+/** Persistence port. The application authorizes the source and scope before calling it. */
+export interface BackupDb {
+  registerSource(source: BackupSource): void;
+  getSource(sourceId: string): BackupSource | null;
+  startBatch(input: StartBackupBatch): BackupBatchState;
+  publishBatch(input: PublishBackupBatch): Promise<BackupBatchReceipt>;
+  failBatch(batchId: string, reason: string): BackupBatchReceipt;
+  recoverInterruptedBatches(): number;
+  getCompleteBatch(sourceId: string, scopeKey: string): string | null;
+  listBatches(access: BackupAccess): BackupBatchSummary[];
+  search(access: BackupAccess, input: BackupSearchCriteria): BackupResult;
+  readRecords(access: BackupAccess, recordId?: string): BackupDetail[];
+  rebuildIndex(): void;
+  verify(): Promise<void>;
+  snapshotTo(destination: string): Promise<void>;
+  close(): void;
+}
 export type OperationTemplate = Omit<StoredOperation, 'receipt'> & {
   receipt: Omit<
     IdentityCommitReceipt,

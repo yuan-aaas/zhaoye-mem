@@ -28,6 +28,43 @@ const nativeId = z
 const date = z.iso.datetime();
 const jsonObject = z.record(z.string(), z.json());
 const count = z.number().int().nonnegative();
+const selection = z.union([z.literal('*'), z.array(id)]);
+export const MnemePolicySchema = z.strictObject({
+  rawMode: z.enum(['sqlite', 'scoped_ndjson']).default('scoped_ndjson'),
+  agents: selection.default('*'),
+  workspaces: selection.default('*'),
+  sensitivities: selection.default('*'),
+  includeUnassigned: z.boolean().default(false),
+  includeUnknownSensitivity: z.boolean().default(false),
+  projects: z
+    .array(z.strictObject({ agent: id.nullable(), workspace: id.nullable(), projectId: id }))
+    .default([]),
+});
+export const BackupAccessSchema = z.strictObject({
+  sourceId: id,
+  scopeId: id,
+  scopeKey: id,
+  projects: selection,
+  includeUnassigned: z.boolean(),
+  batchId: z.uuid().optional(),
+  history: z.boolean().default(false),
+});
+export const BackupSearchSchema = z.strictObject({
+  query: z
+    .string()
+    .trim()
+    .min(1)
+    .max(256)
+    .refine((query) => !query.includes('\0')),
+  projects: selection.optional(),
+  includeUnassigned: z.boolean().default(false),
+  batchId: z.uuid().optional(),
+  history: z.boolean().default(false),
+  from: date.optional(),
+  to: date.optional(),
+  limit: z.number().int().min(1).max(20).default(5),
+  cursor: z.string().min(1).max(512).optional(),
+});
 export const BackupSha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
 export const BackupSourceSchema = z.strictObject({
   sourceId: id,
@@ -102,6 +139,13 @@ export const BackupBatchReceiptSchema = z.strictObject({
 });
 
 export type BackupSource = z.infer<typeof BackupSourceSchema>;
+export type MnemePolicy = z.infer<typeof MnemePolicySchema>;
+export type BackupAccess = z.infer<typeof BackupAccessSchema>;
+export type BackupSearch = z.input<typeof BackupSearchSchema>;
+export type BackupSearchCriteria = Omit<
+  z.output<typeof BackupSearchSchema>,
+  'projects' | 'includeUnassigned' | 'history' | 'batchId'
+>;
 export type StartBackupBatch = z.infer<typeof StartBackupBatchSchema>;
 export type BackupManifest = z.infer<typeof BackupManifestSchema>;
 export type BackupObservation = z.infer<typeof BackupObservationSchema>;
@@ -110,17 +154,3 @@ export type BackupBatchReceipt = z.infer<typeof BackupBatchReceiptSchema>;
 export type BackupBatchState =
   | { batchId: string; status: 'running'; created: boolean }
   | BackupBatchReceipt;
-
-/** Persistence port. The application authorizes the source and scope before calling it. */
-export interface BackupDb {
-  registerSource(source: BackupSource): void;
-  startBatch(input: StartBackupBatch): BackupBatchState;
-  publishBatch(input: PublishBackupBatch): Promise<BackupBatchReceipt>;
-  failBatch(batchId: string, reason: string): BackupBatchReceipt;
-  recoverInterruptedBatches(): number;
-  getCompleteBatch(sourceId: string, scopeKey: string): string | null;
-  rebuildIndex(): void;
-  verify(): Promise<void>;
-  snapshotTo(destination: string): Promise<void>;
-  close(): void;
-}

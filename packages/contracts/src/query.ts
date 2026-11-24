@@ -1,4 +1,4 @@
-import type { Visibility } from './backup.js';
+import type { BackupObservation, Visibility } from './backup.js';
 export interface QueryContext {
   scope_id: string;
   project_ids: string[] | '*';
@@ -16,7 +16,28 @@ export interface BackupHit {
   content_hash: string;
   source_updated_at: string | null;
   visibility: Visibility;
-  batch: { batch_id: string; finished_at: string | null; status: 'complete' | 'partial' };
+  title: string;
+  kind: string;
+  batch: {
+    batch_id: string;
+    captured_at: string;
+    finished_at: string;
+    status: 'complete' | 'partial';
+  };
+}
+
+export interface BackupDetail extends BackupHit {
+  native_id: string;
+  body: string;
+  metadata: BackupObservation['metadata'];
+}
+
+export interface BackupBatchSummary {
+  batch_id: string;
+  status: 'running' | 'complete' | 'partial' | 'failed';
+  captured_at: string | null;
+  finished_at: string | null;
+  rows: number;
 }
 export interface BackupResult {
   hits: BackupHit[];

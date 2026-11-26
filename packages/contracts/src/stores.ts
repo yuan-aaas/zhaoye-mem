@@ -20,6 +20,7 @@ import type { BackupBatchSummary, BackupDetail, BackupResult } from './query.js'
 export interface BackupDb {
   registerSource(source: BackupSource): void;
   getSource(sourceId: string): BackupSource | null;
+  listSources(scopeId: string): { sourceId: string; displayName: string }[];
   startBatch(input: StartBackupBatch): BackupBatchState;
   publishBatch(input: PublishBackupBatch): Promise<BackupBatchReceipt>;
   failBatch(batchId: string, reason: string): BackupBatchReceipt;

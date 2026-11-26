@@ -75,11 +75,43 @@ export type AssetManifest = z.infer<typeof AssetManifestSchema>;
 export type AssetRecord = z.infer<typeof AssetRecordSchema>;
 export type AssetFile = z.infer<typeof AssetFileSchema>;
 
+const writeTarget = {
+  path: AssetPathSchema,
+};
+const expectedSha = z.string().regex(/^[a-f0-9]{64}$/);
+const content = z
+  .string()
+  .max(6000)
+  .refine((value) => !value.includes('\0'));
+export const ConfigBundleWriteSchema = z.discriminatedUnion('action', [
+  z.strictObject({ action: z.literal('create'), ...writeTarget }),
+  z.strictObject({ action: z.literal('update'), ...writeTarget, sha256: expectedSha, content }),
+  z.strictObject({ action: z.literal('delete'), ...writeTarget, sha256: expectedSha }),
+  z.strictObject({
+    action: z.literal('archive'),
+    ...writeTarget,
+    report_type: z.enum(['daily', 'weekly', 'monthly']),
+    content,
+  }),
+]);
+export type ConfigBundleWrite = z.infer<typeof ConfigBundleWriteSchema>;
+
 export interface AssetStore {
   scan(): Promise<AssetManifest>;
   resolveAsset(assetId: string): Promise<AssetRecord>;
   readFile(assetId: string, path: string): Promise<{ file: AssetFile; content: string }>;
+  readBytes(
+    assetId: string,
+    path: string,
+    offset: number,
+    length: number,
+  ): Promise<{ file: AssetFile; base64: string; next_offset: number | null }>;
   verify(assetId: string): Promise<{ asset_id: string; files: number; verified: true }>;
   initialize(): Promise<{ created: boolean }>;
   registerConfigBundle(assetId: string): Promise<AssetRecord>;
+  writeConfigBundle(
+    assetId: string,
+    operation: ConfigBundleWrite,
+    python: string,
+  ): Promise<{ asset_id: string; action: ConfigBundleWrite['action']; path: string }>;
 }

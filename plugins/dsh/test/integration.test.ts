@@ -70,8 +70,13 @@ test('DSH keeps profile details out of fixed instructions and reads complete bou
       async identity() {
         return { document, revision: document.revision, file_hash: '', projection_path: '' };
       },
+      identityVersion: () => assert.fail('unexpected historical read'),
+      identityHistory: () => assert.fail('unexpected identity history call'),
       doctor: () => assert.fail('unexpected diagnostics call'),
       assets: () => assert.fail('unexpected asset call'),
+      refreshAsset: () => assert.fail('unexpected asset refresh'),
+      writeAsset: () => assert.fail('unexpected asset write'),
+      withBackup: () => assert.fail('unexpected backup call'),
       withTasks: () => assert.fail('unexpected task call'),
     },
     agentPresets: {
@@ -91,6 +96,8 @@ test('DSH keeps profile details out of fixed instructions and reads complete bou
   assert.ok(!prompt().includes(detail));
   assert.ok(prompt().includes(voice));
   assert.ok(!prompt().includes(otherTrait));
+  assert.match(prompt(), /回忆类简问一两句说主线。编号、统计、待办等追问。/);
+  assert.match(prompt(), /区分合入、提测和上线。/);
 
   const tool = tools.get('zhaoye_identity_read') ?? assert.fail('missing identity read tool');
   const findTool = tools.get('zhaoye_identity_find') ?? assert.fail('missing identity find tool');
@@ -349,6 +356,9 @@ test('DSH routes multiple independent tasks to ordinary sessions and preserves t
         '{"name":"Config","description":"","version":"1.0.0","modules":{}}',
       );
       await writeFile(join(bundle, 'README.md'), assetBody);
+      const reportFolder = join(bundle, '06-work', 'daily-reports', '2026', '8月');
+      await mkdir(reportFolder, { recursive: true });
+      await writeFile(join(reportFolder, '2026-08-03.md'), '一份工作日报');
       await rootOwner.assets.registerConfigBundle(assetId);
     } finally {
       await rootOwner.close();
@@ -366,6 +376,25 @@ test('DSH routes multiple independent tasks to ordinary sessions and preserves t
       items: ['README.md'],
       next_offset: null,
     });
+    assert.deepEqual(await invoke(find, { asset_id: assetId, query: '8月日报' }), {
+      asset_id: assetId,
+      items: ['06-work/daily-reports/2026/8月/2026-08-03.md'],
+      next_offset: null,
+    });
+    assert.deepEqual(await invoke('zhaoye_backup_find', {}), { items: [], next_offset: null });
+    assert.deepEqual(await invoke('zhaoye_identity_read', { snapshot_revision: '1' }), {
+      revision: 1,
+      sections: SECTION_NAMES,
+    });
+    const binary = (await invoke('zhaoye_asset_read_bytes', {
+      asset_id: assetId,
+      path: 'README.md',
+    })) as {
+      base64: string;
+      next_offset: string | null;
+    };
+    assert.ok(Buffer.from(binary.base64, 'base64').length <= 600);
+    assert.ok(binary.next_offset);
     const loc = { asset_id: assetId, path: 'README.md' };
     type Page = { content: string; sha256: string; next_offset: string | null };
     let page = (await invoke(read, loc)) as Page;

@@ -58,16 +58,13 @@ test('CLI registers a portable config bundle and reads only verified catalogued 
   assert.equal(files.next_offset, 1);
   assert.equal((await invoke('assets', 'read', assetId, guide)).data.content, '按需读取');
   for (const path of ['06-work/private.md', '07-knowledge/daily/private.md']) {
-    assert.equal((await invoke('assets', 'read', assetId, path)).error.code, 'NOT_FOUND');
+    assert.equal((await invoke('assets', 'read', assetId, path)).data.content, 'private');
   }
   assert.equal(
     (await invoke('assets', 'read', assetId, '../identity.json')).error.code,
     'INVALID_INPUT',
   );
-  assert.equal(
-    (await invoke('assets', 'read', assetId, 'manifest.json')).error.code,
-    'UNAUTHORIZED',
-  );
+  assert.equal((await invoke('assets', 'read', assetId, 'manifest.json')).data.content, native);
   assert.equal(
     (await invoke('assets', 'read', assetId, '01-skills/large.txt')).error.code,
     'BUDGET_EXCEEDED',

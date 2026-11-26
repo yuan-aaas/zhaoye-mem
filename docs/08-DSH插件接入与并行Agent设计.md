@@ -78,6 +78,8 @@ flowchart LR
 
 可信 DSH profile 可通过 `allowedIdentityProjects` 限定画像中的项目可见范围。省略时沿用当前数据根的完整项目画像，空数组隐藏全部项目。查找、精确读取和整章分页共享同一范围。Mneme 工具继续使用宿主授予的独立权限。
 
+照夜助手可按需读取同一数据根的三个数据域。`zhaoye_identity_history` 列出版本，可用 `snapshot_revision` 读取留存的历史画像。`zhaoye_backup_find` 和 `zhaoye_backup_read` 按来源和批次读取本地 SQLite 备份，保留导入时的范围和可见性规则。`zhaoye_asset_find` 和读取工具可访问已登记包的工作归档及其他原件，配置包维护走原生接口。 [个人资产库与配置包接入](09-M3-个人资产库与配置包接入.md)
+
 ### 自迭代入口与生命周期
 
 为应用层预留 `ProfileEvolutionPort.propose(input)` 契约。输入为 `assistant_id`、`base_revision`、`evidence_refs` 和用户或会话触发来源。输出限定为用户画像或助手性格的候选变更，携带置信度和证据引用。以后经策略、版本冲突和来源校验，才可由既有人格更新入口提交。当前只有接口类型，助手对话和查证过程独立运作。

@@ -1,14 +1,29 @@
 import type { openAssetLibrary } from '@zhaoye/app';
 import { BUDGETS, ZhaoyeError } from '@zhaoye/contracts';
-import { pageContent } from './identity-context.js';
+import { pageContent, parseOffset } from './identity-context.js';
 
 type Library = Awaited<ReturnType<typeof openAssetLibrary>>;
 
-function parseOffset(offset: string | undefined) {
-  if (offset !== undefined && !/^(?:0|[1-9]\d{0,11})$/.test(offset)) {
-    throw new ZhaoyeError('INVALID_INPUT', 'offset 必须是非负整数');
-  }
-  return Number(offset ?? 0);
+export async function readAssetBytes(
+  library: Library,
+  args: {
+    asset_id: string;
+    path: string;
+    sha256?: string | undefined;
+    offset?: string | undefined;
+  },
+) {
+  const offset = parseOffset(args.offset);
+  if (offset > 0 && !args.sha256)
+    throw new ZhaoyeError('INVALID_INPUT', '资产续读需要有效的 sha256');
+  const result = await library.readBytes(args.asset_id, args.path, offset, 600);
+  if (args.sha256 && result.file.sha256 !== args.sha256)
+    throw new ZhaoyeError('CONFLICT', '资产版本已更新，请从头读取');
+  return {
+    sha256: result.file.sha256,
+    base64: result.base64,
+    next_offset: result.next_offset === null ? null : String(result.next_offset),
+  };
 }
 
 export async function findAssets(

@@ -22,6 +22,12 @@ interface ReadArguments {
 
 type Entry = ContinuityEntry | ProfileEntry | ProjectEntry;
 
+export function parseOffset(offset: string | undefined) {
+  if (offset !== undefined && !/^(?:0|[1-9]\d{0,11})$/.test(offset))
+    throw new ZhaoyeError('INVALID_INPUT', 'offset 必须是非负整数');
+  return Number(offset ?? 0);
+}
+
 function sectionName(input: string | undefined): SectionName {
   const parsed = SectionNameSchema.safeParse(input);
   if (!parsed.success) throw new ZhaoyeError('INVALID_INPUT', '请指定画像目录中的 section');

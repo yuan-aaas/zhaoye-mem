@@ -313,6 +313,12 @@ export function createIdentityService(
     commitKernel: (req: IdentityCommitRequest, ctx: ActorContext) => doCommit(req, ctx, true),
     rollback: (req: IdentityRollbackRequest, ctx: ActorContext) => rollback(req, ctx),
     rollbackKernel: (req: IdentityRollbackRequest, ctx: ActorContext) => rollback(req, ctx, true),
+    readVersion: async (ctx: ActorContext, revision: number) => {
+      await authorize(ctx);
+      if (!Number.isSafeInteger(revision) || revision < 1)
+        throw new ZhaoyeError('INVALID_INPUT', '画像版本号无效');
+      return store.readVersion(revision);
+    },
     listVersions: async (ctx: ActorContext, limit = 20) => {
       await authorize(ctx);
       if (!Number.isInteger(limit) || limit < 1 || limit > 200)

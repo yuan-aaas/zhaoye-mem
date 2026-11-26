@@ -1,8 +1,14 @@
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { isAbsolute, join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import { createZhaoye, doctor, openAssetLibrary, type Zhaoye } from '@zhaoye/app';
-import { ActorContextSchema, ZhaoyeError } from '@zhaoye/contracts';
+import {
+  type ActorContext,
+  ActorContextSchema,
+  type ConfigBundleWrite,
+  type IdentityDocument,
+  ZhaoyeError,
+} from '@zhaoye/contracts';
 import type {
   DshAgent,
   DshApproval,
@@ -11,6 +17,7 @@ import type {
   DshWorkspaces,
   InboxItem,
   SessionEvent,
+  ToolExecution,
 } from './api.js';
 import { TaskService, taskDatabaseName } from './tasks.js';
 
@@ -44,11 +51,28 @@ interface PluginConfig {
   projectRoots?: Record<string, string>;
   allowedIdentityProjects?: string[];
   allowedTargetSessions?: Record<string, string[]>;
+  assetBundlePython?: string;
 }
 
 export interface DshService {
   identity(sessionId: string): ReturnType<Zhaoye['identity']['read']>;
+  identityVersion(
+    sessionId: string,
+    revision: number,
+  ): ReturnType<Zhaoye['identity']['readVersion']>;
+  identityHistory(sessionId: string): ReturnType<Zhaoye['identity']['listVersions']>;
   assets(): ReturnType<typeof openAssetLibrary>;
+  refreshAsset(assetId: string): Promise<{ asset_id: string; files: number }>;
+  writeAsset(
+    assetId: string,
+    operation: ConfigBundleWrite,
+    execution: ToolExecution,
+    agent: DshAgent,
+  ): ReturnType<Zhaoye['assets']['writeConfigBundle']>;
+  withBackup<T>(
+    sessionId: string,
+    operation: (backup: Zhaoye['backup'], actor: ActorContext) => Promise<T>,
+  ): Promise<T>;
   doctor(): ReturnType<typeof doctor>;
   withTasks<T>(operation: (service: TaskService) => Promise<T>): Promise<T>;
 }
@@ -65,6 +89,23 @@ export function apply(ctx: DshPluginContext, config: PluginConfig = {}): void {
     throw new ZhaoyeError('INVALID_INPUT', '自动初始化需要显式配置 DSH 照夜数据根');
   }
   const dataRoot = explicitRoot ?? join(homedir(), '.zhaoye');
+  const bundledPython =
+    process.platform === 'win32'
+      ? join(
+          dirname(process.execPath),
+          'resources',
+          'runtime',
+          'primary-runtime',
+          'dependencies',
+          'python',
+          'python.exe',
+        )
+      : undefined;
+  const python =
+    config.assetBundlePython ??
+    (bundledPython && existsSync(bundledPython) ? bundledPython : undefined);
+  if (python !== undefined && (typeof python !== 'string' || !isAbsolute(python)))
+    throw new ZhaoyeError('INVALID_INPUT', 'assetBundlePython 必须是受信任解释器的绝对路径');
   const projectRoots = new Map(Object.entries(config.projectRoots ?? {}));
   const identityProjects = ActorContextSchema.shape.granted_project_ids.safeParse(
     config.allowedIdentityProjects === undefined ? '*' : config.allowedIdentityProjects,
@@ -75,7 +116,9 @@ export function apply(ctx: DshPluginContext, config: PluginConfig = {}): void {
   ) {
     throw new ZhaoyeError('INVALID_INPUT', 'allowedIdentityProjects 必须是有效的项目 ID 列表');
   }
-  const projectGrants = identityProjects.data === '*' ? undefined : new Set(identityProjects.data);
+  const grantedIdentityProjects = identityProjects.data;
+  const projectGrants =
+    grantedIdentityProjects === '*' ? undefined : new Set(grantedIdentityProjects);
   const targetGrants = new Map<string, ReadonlySet<string>>();
   for (const [owner, targets] of Object.entries(config.allowedTargetSessions ?? {})) {
     if (
@@ -114,26 +157,73 @@ export function apply(ctx: DshPluginContext, config: PluginConfig = {}): void {
     return opening;
   }
 
+  function identityActor(app: Zhaoye, sessionId: string): ActorContext {
+    return {
+      adapter_id: 'dsh-plugin-zhaoye',
+      host: 'dsh',
+      session_id: sessionId,
+      scope_id: app.assistantId,
+      granted_project_ids: grantedIdentityProjects,
+      granted_source_ids: [],
+    };
+  }
+  function visibleIdentity(document: IdentityDocument) {
+    if (projectGrants)
+      document.project_state.projects = document.project_state.projects.filter((project) =>
+        projectGrants.has(project.project_id),
+      );
+    return document;
+  }
   const service: DshService = {
     async identity(sessionId) {
       const app = await open();
-      const snapshot = await app.identity.read({
-        adapter_id: 'dsh-plugin-zhaoye',
-        host: 'dsh',
-        session_id: sessionId,
-        scope_id: app.assistantId,
-        granted_project_ids: identityProjects.data,
-        granted_source_ids: [],
-      });
-      if (projectGrants) {
-        snapshot.document.project_state.projects = snapshot.document.project_state.projects.filter(
-          (project) => projectGrants.has(project.project_id),
-        );
-      }
+      const snapshot = await app.identity.read(identityActor(app, sessionId));
+      visibleIdentity(snapshot.document);
       return snapshot;
+    },
+    async identityVersion(sessionId, revision) {
+      const app = await open();
+      return visibleIdentity(
+        await app.identity.readVersion(identityActor(app, sessionId), revision),
+      );
+    },
+    async identityHistory(sessionId) {
+      const app = await open();
+      return app.identity.listVersions(identityActor(app, sessionId), 200);
     },
     doctor: () => doctor(dataRoot),
     assets: () => openAssetLibrary(dataRoot),
+    async refreshAsset(assetId) {
+      const asset = await (await open()).assets.registerConfigBundle(assetId);
+      return { asset_id: asset.asset_id, files: asset.files.length };
+    },
+    async writeAsset(assetId, operation, execution, agent) {
+      if (!python)
+        throw new ZhaoyeError('SOURCE_UNAVAILABLE', '此 DSH 未配置资产包解释器 assetBundlePython');
+      const outcome = await ctx.get('approval')?.request({
+        agent,
+        toolName: 'zhaoye_asset_write',
+        callId: execution.callId,
+        signal: execution.signal,
+        reason: `允许照夜对本地配置包 ${assetId}/${operation.path} 执行 ${operation.action}${operation.action === 'archive' ? `（${operation.report_type}）` : ''} 吗？`,
+      });
+      execution.signal.throwIfAborted();
+      if (outcome !== 'allowed-once') throw new ZhaoyeError('UNAUTHORIZED', '本次资产写入未获授权');
+      return (await open()).assets.writeConfigBundle(assetId, operation, python);
+    },
+    async withBackup(sessionId, operation) {
+      const app = await open();
+      return operation(app.backup, {
+        adapter_id: 'dsh',
+        host: 'dsh',
+        session_id: sessionId,
+        scope_id: app.assistantId,
+        granted_project_ids: '*',
+        granted_source_ids: '*',
+        backup_unassigned: true,
+        backup_history: true,
+      });
+    },
     async withTasks(operation) {
       const pending = open().then((app) => {
         tasks ??= new TaskService(app.dataRoot, ctx, projectRoots, targetGrants);

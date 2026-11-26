@@ -104,6 +104,7 @@ export async function createZhaoye(config: ZhaoyeConfig) {
     rollback: track(service.rollback),
     rollbackKernel: track(service.rollbackKernel),
     listVersions: track(service.listVersions),
+    readVersion: track(service.readVersion),
   };
   const backup = createBackupFacade(root, manifest.assistant_id, config.host.host_id, assertOwner);
   const assetStore = createAssetStore(root, { now: () => clock.now(), assertOwner });
@@ -124,11 +125,14 @@ export async function createZhaoye(config: ZhaoyeConfig) {
       list: track(assetReader.list),
       files: track(assetReader.files),
       read: track(assetReader.read),
+      readBytes: track(assetReader.readBytes),
       verify: track(assetReader.verify),
       initialize: track(assetStore.initialize),
       registerConfigBundle: track(assetStore.registerConfigBundle),
+      writeConfigBundle: track(assetStore.writeConfigBundle),
     },
     backup: {
+      listSources: track(backup.listSources),
       registerMneme: track(backup.registerMneme),
       importSnapshot: track(backup.importSnapshot),
       listImportBatches: track(backup.listImportBatches),

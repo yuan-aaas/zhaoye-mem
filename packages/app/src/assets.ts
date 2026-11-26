@@ -49,9 +49,19 @@ export function createAssetReader(store: AssetStore) {
     },
     files: async (assetId: string, options: AssetQuery = {}) => {
       const asset = await store.resolveAsset(assetId);
-      return select(asset.files, ({ path }) => path, options);
+      const query = options.query?.replace(/(日报|周报|月报)/g, ' $1 ');
+      return select(
+        asset.files,
+        ({ path }) =>
+          path
+            .replace('/daily-reports/', '/daily-reports/ 日报 ')
+            .replace('/weekly-reports/', '/weekly-reports/ 周报 ')
+            .replace('/monthly-reports/', '/monthly-reports/ 月报 '),
+        { ...options, query },
+      );
     },
     read: store.readFile,
+    readBytes: store.readBytes,
     verify: store.verify,
   };
 }

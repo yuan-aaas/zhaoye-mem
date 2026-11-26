@@ -113,6 +113,15 @@ export function createBackupFacade(
     return withDb(false, (db) => fn(db, access(db, ctx, sourceId, options)));
   };
   return {
+    listSources(ctx: ActorContext) {
+      authorize(ctx, scope, adapter);
+      const grants = ctx.granted_source_ids;
+      return withDb(false, (db) =>
+        db
+          .listSources(scope)
+          .filter((source) => grants === '*' || grants.includes(source.sourceId)),
+      );
+    },
     async registerMneme(
       input: { file?: string; policy: Record<string, unknown>; sourceId?: string },
       ctx: ActorContext,

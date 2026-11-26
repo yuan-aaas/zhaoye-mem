@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
-import { lstat, open, readdir, realpath } from 'node:fs/promises';
-import { extname, join } from 'node:path';
+import { open, readdir, realpath } from 'node:fs/promises';
+import { join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import {
   type AssetFile,
@@ -11,10 +11,13 @@ import {
   type AssetRecord,
   type AssetStore,
   ConfigBundleManifestSchema,
+  ConfigBundleWriteSchema,
   parseInput,
   ZhaoyeError,
 } from '@zhaoye/contracts';
-import { ensureDir, ioError, isMissing, writeAtomic } from './atomic-fs.js';
+import { ensureDir, ioError, writeAtomic } from './atomic-fs.js';
+import { inspectAssetPath as inspect } from './internal/asset-paths.js';
+import { runBundleWrite } from './internal/config-bundle-cli.js';
 import { createMutex } from './internal/mutex.js';
 
 const bundleModules = [
@@ -23,6 +26,7 @@ const bundleModules = [
   '03-memory',
   '04-commands',
   '05-snippets',
+  '06-work',
   '07-knowledge',
 ] as const;
 const bundleEntries = [
@@ -31,50 +35,8 @@ const bundleEntries = [
   { kind: 'cli-doc', path: '_cli/README.md', description: '原项目 CLI 的文档' },
   { kind: 'migration', path: '_meta/MIGRATION.md', description: '原项目迁移说明' },
 ];
-const omittedDirectories = new Set(['__pycache__', 'node_modules']);
-const omittedExtensions = new Set(['.bak', '.pyc']);
-const textExtensions = new Set([
-  '.md',
-  '.txt',
-  '.json',
-  '.yaml',
-  '.yml',
-  '.css',
-  '.html',
-  '.js',
-  '.ts',
-  '.py',
-  '.ps1',
-  '.sh',
-  '.dart',
-  '.vue',
-  '.xml',
-  '.toml',
-  '.csv',
-]);
 const textReadBytes = 128 * 1024;
 const catalogBytes = 16 * 1024 * 1024;
-
-// Check every component to reject directory junctions and symlinks as well as linked files.
-async function inspect(base: string, path: string) {
-  const parts = path.split('/');
-  let absolute = base;
-  for (const [index, part] of parts.entries()) {
-    absolute = join(absolute, parseInput(AssetPathSchema, part));
-    try {
-      const info = await lstat(absolute);
-      if (info.isSymbolicLink())
-        throw new ZhaoyeError('INVALID_INPUT', '资产路径含符号链接或目录联接', { path });
-      if (index === parts.length - 1) return { absolute, info };
-      if (!info.isDirectory())
-        throw new ZhaoyeError('NOT_FOUND', '资产路径中的目录不存在', { path });
-    } catch (error) {
-      if (isMissing(error)) return null;
-      throw ioError(error, absolute);
-    }
-  }
-  return null;
-}
 
 async function requirePath(base: string, path: string, type: 'file' | 'directory') {
   const item = await inspect(base, path);
@@ -84,7 +46,11 @@ async function requirePath(base: string, path: string, type: 'file' | 'directory
   return item.absolute;
 }
 
-async function readBytes(absolute: string, maxBytes?: number) {
+async function readBytes(
+  absolute: string,
+  maxBytes?: number,
+  range?: { start: number; end: number },
+) {
   try {
     const handle = await open(absolute, 'r');
     try {
@@ -93,6 +59,7 @@ async function readBytes(absolute: string, maxBytes?: number) {
       const buffer = Buffer.allocUnsafe(64 * 1024);
       const chunks: Buffer[] = [];
       while (true) {
+        const start = bytes;
         const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
         if (bytesRead === 0) break;
         bytes += bytesRead;
@@ -101,6 +68,15 @@ async function readBytes(absolute: string, maxBytes?: number) {
         const chunk = buffer.subarray(0, bytesRead);
         hash.update(chunk);
         if (maxBytes !== undefined) chunks.push(Buffer.from(chunk));
+        if (range && start < range.end && bytes > range.start)
+          chunks.push(
+            Buffer.from(
+              chunk.subarray(
+                Math.max(0, range.start - start),
+                Math.min(bytesRead, range.end - start),
+              ),
+            ),
+          );
       }
       return { bytes, sha256: hash.digest('hex'), content: Buffer.concat(chunks) };
     } finally {
@@ -115,7 +91,7 @@ function decode(raw: Buffer) {
   try {
     return new TextDecoder('utf-8', { fatal: true }).decode(raw);
   } catch {
-    throw new ZhaoyeError('INVALID_INPUT', '资产正文必须是 UTF-8 文本');
+    throw new ZhaoyeError('INVALID_INPUT', '资产正文需要以 UTF-8 读取；其他格式可读取字节');
   }
 }
 
@@ -131,25 +107,15 @@ async function scanBundlePaths(
   bundle: string,
   manifest: ReturnType<typeof ConfigBundleManifestSchema.parse>,
 ) {
-  const paths = ['manifest.json'];
-  for (const { path } of bundleEntries) {
-    if (await inspect(bundle, path)) paths.push(path);
-  }
-  async function walk(directory: string) {
-    const absolute = await requirePath(bundle, directory, 'directory');
+  const paths: string[] = [];
+  async function walk(directory = '') {
+    const absolute = directory ? await requirePath(bundle, directory, 'directory') : bundle;
     const entries = await readdir(absolute, { withFileTypes: true }).catch((e: unknown) => {
       throw ioError(e, absolute);
     });
     for (const entry of entries) {
-      const name = entry.name.toLowerCase();
-      if (
-        name.startsWith('.') ||
-        omittedDirectories.has(name) ||
-        (directory === '07-knowledge' && name === 'daily') ||
-        omittedExtensions.has(extname(name))
-      )
-        continue;
-      const path = `${directory}/${entry.name}`;
+      if (entry.name.toLowerCase() === '.git') continue;
+      const path = directory ? `${directory}/${entry.name}` : entry.name;
       parseInput(AssetPathSchema, path);
       if (entry.isDirectory()) await walk(path);
       else {
@@ -165,8 +131,9 @@ async function scanBundlePaths(
     if (!entry) continue;
     if (entry.path !== module && entry.path !== `${module}/`)
       throw new ZhaoyeError('CORRUPT_DATA', '配置包模块路径与目录约定不一致', { module });
-    await walk(module);
+    await requirePath(bundle, module, 'directory');
   }
+  await walk();
   return paths.sort();
 }
 
@@ -210,29 +177,100 @@ export function createAssetStore(
     if (!asset) throw new ZhaoyeError('NOT_FOUND', '资产未登记', { assetId });
     return asset;
   }
-  async function verifyFile(base: string, id: string, file: AssetFile, maxBytes?: number) {
+  async function verifyFile(
+    base: string,
+    id: string,
+    file: AssetFile,
+    maxBytes?: number,
+    range?: { start: number; end: number },
+  ) {
     const absolute = await requirePath(base, `assets/files/${id}/${file.path}`, 'file');
-    const actual = await readBytes(absolute, maxBytes);
+    const actual = await readBytes(absolute, maxBytes, range);
     if (actual.sha256 !== file.sha256 || actual.bytes !== file.bytes)
       throw new ZhaoyeError('INTEGRITY_FAILED', '资产文件与登记摘要不一致', { path: file.path });
     return actual.content;
+  }
+  async function findFile(assetId: string, path: string) {
+    const key = parseInput(AssetPathSchema, path);
+    const asset = await resolveAsset(assetId);
+    const file = asset.files.find((entry) => entry.path === key);
+    if (!file) throw new ZhaoyeError('NOT_FOUND', '资产文件未登记', { path: key });
+    return file;
+  }
+  async function register(inputId: string) {
+    await assertOwner();
+    const assetId = parseInput(AssetIdSchema, inputId);
+    const base = await root();
+    const bundle = await requirePath(base, `assets/files/${assetId}`, 'directory');
+    const manifestPath = await requirePath(bundle, 'manifest.json', 'file');
+    const nativeManifest = await readBytes(manifestPath, 1024 * 1024);
+    const source = parseJson(nativeManifest.content, manifestPath, ConfigBundleManifestSchema);
+    const paths = await scanBundlePaths(bundle, source);
+    const files: AssetFile[] = [];
+    for (const path of paths) {
+      const { bytes, sha256 } =
+        path === 'manifest.json'
+          ? nativeManifest
+          : await readBytes(await requirePath(bundle, path, 'file'));
+      files.push({ path, bytes, sha256 });
+    }
+    const registered = (await existing(base)) ?? { schema_version: 1, assets: [] };
+    const former = registered.assets.find((asset) => asset.asset_id === assetId);
+    const at = now().toISOString();
+    const entry: AssetRecord = {
+      asset_id: assetId,
+      kind: 'config',
+      name: source.name,
+      version: source.version,
+      description: source.description,
+      source: `files/${assetId}/manifest.json`,
+      files,
+      entrypoints: bundleEntries.filter(({ path }) => paths.includes(path)),
+      dependencies: [],
+      permissions: ['read'],
+      created_at: former?.created_at ?? at,
+      updated_at: former?.updated_at ?? at,
+    };
+    if (isDeepStrictEqual(entry, former)) return entry;
+    entry.updated_at = at;
+    const assets = former
+      ? registered.assets.map((asset) => (asset.asset_id === assetId ? entry : asset))
+      : [...registered.assets, entry];
+    const manifest = parseInput(AssetManifestSchema, { schema_version: 1, assets });
+    const encoded = `${JSON.stringify(manifest, null, 2)}\n`;
+    if (Buffer.byteLength(encoded) > catalogBytes)
+      throw new ZhaoyeError('BUDGET_EXCEEDED', '资产清单超过存储上限');
+    await assertOwner();
+    await writeAtomic(join(base, 'assets/manifest.json'), encoded);
+    return entry;
   }
   return {
     scan,
     resolveAsset,
     readFile: async (assetId, path) => {
-      const key = parseInput(AssetPathSchema, path);
-      const asset = await resolveAsset(assetId);
-      const file = asset.files.find((entry) => entry.path === key);
-      if (!file) throw new ZhaoyeError('NOT_FOUND', '资产文件未登记', { path: key });
-      if (asset.kind === 'config' && key === 'manifest.json')
-        throw new ZhaoyeError('UNAUTHORIZED', '原生配置包清单包含机器路径，仅登记摘要');
-      if (!textExtensions.has(extname(key).toLowerCase()))
-        throw new ZhaoyeError('INVALID_INPUT', '该格式仅支持资产定位和摘要校验', { path: key });
+      const file = await findFile(assetId, path);
       return {
         file,
         content: decode(await verifyFile(await root(), assetId, file, textReadBytes)),
       };
+    },
+    readBytes: async (assetId, path, offset, length) => {
+      if (
+        !Number.isSafeInteger(offset) ||
+        offset < 0 ||
+        !Number.isSafeInteger(length) ||
+        length < 1 ||
+        length > 4096
+      )
+        throw new ZhaoyeError('INVALID_INPUT', '字节读取范围无效');
+      const file = await findFile(assetId, path);
+      if (offset > file.bytes) throw new ZhaoyeError('INVALID_INPUT', '字节偏移超出文件大小');
+      const end = Math.min(file.bytes, offset + length);
+      const bytes = await verifyFile(await root(), assetId, file, undefined, {
+        start: offset,
+        end,
+      });
+      return { file, base64: bytes.toString('base64'), next_offset: end < file.bytes ? end : null };
     },
     verify: async (assetId) => {
       const asset = await resolveAsset(assetId);
@@ -251,53 +289,46 @@ export function createAssetStore(
         await writeAtomic(join(base, 'assets/manifest.json'), '{"schema_version":1,"assets":[]}\n');
         return { created: true };
       }),
-    registerConfigBundle: (inputId) =>
+    registerConfigBundle: (id) => serialized(() => register(id)),
+    writeConfigBundle: (id, input, python) =>
       serialized(async () => {
         await assertOwner();
-        const assetId = parseInput(AssetIdSchema, inputId);
+        const operation = parseInput(ConfigBundleWriteSchema, input);
+        const asset = await resolveAsset(id);
+        if (asset.asset_id !== 'ai-config-bundle' || asset.kind !== 'config')
+          throw new ZhaoyeError('INVALID_INPUT', '该资产没有配置包写入接口');
         const base = await root();
-        const bundle = await requirePath(base, `assets/files/${assetId}`, 'directory');
-        const manifestPath = await requirePath(bundle, 'manifest.json', 'file');
-        const nativeManifest = await readBytes(manifestPath, 1024 * 1024);
-        const source = parseJson(nativeManifest.content, manifestPath, ConfigBundleManifestSchema);
-        const paths = await scanBundlePaths(bundle, source);
-        const files: AssetFile[] = [];
-        for (const path of paths) {
-          const { bytes, sha256 } =
-            path === 'manifest.json'
-              ? nativeManifest
-              : await readBytes(await requirePath(bundle, path, 'file'));
-          files.push({ path, bytes, sha256 });
+        const bundle = await requirePath(base, `assets/files/${asset.asset_id}`, 'directory');
+        const script = await findFile(id, '_cli/bundle.py');
+        const native = await findFile(id, 'manifest.json');
+        await verifyFile(base, id, script);
+        const metadata = parseJson(
+          await verifyFile(base, id, native, 1024 * 1024),
+          native.path,
+          ConfigBundleManifestSchema,
+        );
+        if (operation.action !== 'archive') {
+          const module = operation.path.split('/')[0];
+          if (
+            module === undefined ||
+            !bundleModules.some((m) => m === module) ||
+            !metadata.modules[module]
+          )
+            throw new ZhaoyeError('INVALID_INPUT', '写入路径必须属于原生清单声明的模块');
         }
-        const registered = (await existing(base)) ?? { schema_version: 1, assets: [] };
-        const former = registered.assets.find((asset) => asset.asset_id === assetId);
-        const at = now().toISOString();
-        const entry: AssetRecord = {
-          asset_id: assetId,
-          kind: 'config',
-          name: source.name,
-          version: source.version,
-          description: source.description,
-          source: `files/${assetId}/manifest.json`,
-          files,
-          entrypoints: bundleEntries.filter(({ path }) => paths.includes(path)),
-          dependencies: [],
-          permissions: ['read'],
-          created_at: former?.created_at ?? at,
-          updated_at: former?.updated_at ?? at,
-        };
-        if (isDeepStrictEqual(entry, former)) return entry;
-        entry.updated_at = at;
-        const assets = former
-          ? registered.assets.map((asset) => (asset.asset_id === assetId ? entry : asset))
-          : [...registered.assets, entry];
-        const manifest = parseInput(AssetManifestSchema, { schema_version: 1, assets });
-        const encoded = `${JSON.stringify(manifest, null, 2)}\n`;
-        if (Buffer.byteLength(encoded) > catalogBytes)
-          throw new ZhaoyeError('BUDGET_EXCEEDED', '资产清单超过存储上限');
-        await assertOwner();
-        await writeAtomic(join(base, 'assets/manifest.json'), encoded);
-        return entry;
+        if (operation.action === 'update' || operation.action === 'delete') {
+          const file = await findFile(id, operation.path);
+          if (operation.sha256 !== file.sha256)
+            throw new ZhaoyeError('CONFLICT', '资产版本已变化，请重新读取文件');
+          await verifyFile(base, id, file);
+        }
+        const path = await runBundleWrite(bundle, python, operation);
+        try {
+          await register(id);
+        } catch {
+          throw new ZhaoyeError('COMMIT_UNKNOWN', '配置包已写入，资产清单需重新登记', { path });
+        }
+        return { asset_id: id, action: operation.action, path };
       }),
   };
 }

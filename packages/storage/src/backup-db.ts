@@ -557,6 +557,16 @@ export async function openBackupDb(
 
   return {
     registerSource,
+    listSources: (scopeId) =>
+      run(
+        () =>
+          db
+            .prepare(`
+      SELECT source_id AS sourceId, display_name AS displayName
+      FROM backup_sources WHERE scope_id=? AND source_kind='mneme' ORDER BY source_id
+    `)
+            .all(scopeId) as { sourceId: string; displayName: string }[],
+      ),
     getSource: (sourceId) =>
       run(() => {
         const row = db.prepare('SELECT * FROM backup_sources WHERE source_id=?').get(sourceId);

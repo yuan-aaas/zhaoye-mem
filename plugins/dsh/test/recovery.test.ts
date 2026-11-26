@@ -45,6 +45,7 @@ test('a cold history failure leaves only that task unknown and recovers later ta
   );
   try {
     const caller: DshAgent = {
+      ctx: {},
       session: {
         id: 'assistant',
         header: { cwd: directory },

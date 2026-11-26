@@ -4,10 +4,11 @@ import type { DshService } from './host.js';
 import { readIdentityPage } from './identity-context.js';
 
 export const name = 'zhaoye-assistant-agent';
-export const inject = ['zhaoyeDsh', 'tools', 'systemPrompt'];
+export const inject = ['zhaoyeDsh', 'agentPresets', 'tools', 'systemPrompt'];
 
 interface AssistantContext {
   zhaoyeDsh: DshService;
+  agentPresets: { composedPreset(agentContext: DshAgent['ctx']): string | undefined };
   tools: { register(definition: ToolDefinition): void };
   systemPrompt: {
     section(section: { name: string; order: number; interpolate: false; text(): string }): void;
@@ -82,7 +83,7 @@ function register<const Fields extends Record<string, Field>>(
     },
     execute(args, execution) {
       const agent = execution.agent;
-      if (agent?.session.header.agentPreset !== assistantPreset) {
+      if (!agent || ctx.agentPresets.composedPreset(agent.ctx) !== assistantPreset) {
         throw new ZhaoyeError('UNAUTHORIZED', '此工具只授权给照夜助手会话');
       }
       execution.signal.throwIfAborted();

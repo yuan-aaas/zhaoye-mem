@@ -35,6 +35,8 @@ test('DSH keeps profile details out of fixed instructions and reads complete bou
   });
   let prompt = () => '';
   const tools = new Map<string, ToolDefinition>();
+  const agentContext = {};
+  let activePreset: string | undefined = 'cordis';
   await mountAssistant({
     zhaoyeDsh: {
       async identity() {
@@ -42,6 +44,9 @@ test('DSH keeps profile details out of fixed instructions and reads complete bou
       },
       doctor: () => assert.fail('unexpected diagnostics call'),
       withTasks: () => assert.fail('unexpected task call'),
+    },
+    agentPresets: {
+      composedPreset: (context) => (context === agentContext ? activePreset : undefined),
     },
     tools: { register: (definition) => tools.set(definition.name, definition) },
     systemPrompt: {
@@ -58,9 +63,10 @@ test('DSH keeps profile details out of fixed instructions and reads complete bou
 
   const tool = tools.get('zhaoye_identity_read') ?? assert.fail('missing identity tool');
   const agent: DshAgent = {
+    ctx: agentContext,
     session: {
       id: 'assistant',
-      header: { agentPreset: 'zhaoye-assistant' },
+      header: { agentPreset: 'cordis' },
       snapshotEvents: () => [],
     },
     status: 'idle',
@@ -71,6 +77,8 @@ test('DSH keeps profile details out of fixed instructions and reads complete bou
       tool.execute(args, { agent, signal: new AbortController().signal, callId: 'identity' }),
     );
   }
+  await assert.rejects(read({}), { code: 'UNAUTHORIZED' });
+  activePreset = 'zhaoye-assistant';
   assert.deepEqual(await read({}), { revision: 1, sections: SECTION_NAMES });
   const first = { section: 'project_state', revision: '1' };
   type Page = { revision: number; section: string; content: string; next_cursor: string | null };
@@ -96,11 +104,15 @@ test('DSH keeps profile details out of fixed instructions and reads complete bou
   document.revision++;
   await assert.rejects(read(first), { code: 'CONFLICT' });
   await assert.rejects(read({ cursor: firstCursor }), { code: 'CONFLICT' });
+  activePreset = undefined;
+  agent.session.header.agentPreset = 'zhaoye-assistant';
+  await assert.rejects(read({}), { code: 'UNAUTHORIZED' });
 });
 
 test('DSH routes multiple independent tasks to ordinary sessions and preserves their turn receipts', async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'zhaoye-dsh-test-')));
   const agents = new Map<string, DshAgent>();
+  const activePresets = new WeakMap<object, string>();
   const headers = new Map<string, DshAgent['session']['header']>();
   const logs = new Map<string, SessionEvent[]>();
   let sessionEvent = (_session: DshAgent['session'], _event: SessionEvent) => {};
@@ -117,10 +129,12 @@ test('DSH routes multiple independent tasks to ordinary sessions and preserves t
     const history: SessionEvent[] = [];
     logs.set(id, history);
     const created: DshAgent = {
+      ctx: {},
       session: { id, header: { cwd: root, agentPreset: preset }, snapshotEvents: () => history },
       status: 'idle',
       inbox: { nextTurn: [], nextStep: [] },
     };
+    activePresets.set(created.ctx, preset);
     agents.set(id, created);
     headers.set(id, created.session.header);
     return created;
@@ -193,6 +207,7 @@ test('DSH routes multiple independent tasks to ordinary sessions and preserves t
     const service = mounted ?? assert.fail('service missing');
     await mountAssistant({
       zhaoyeDsh: service,
+      agentPresets: { composedPreset: (context) => activePresets.get(context) },
       tools: { register: (definition) => tools.set(definition.name, definition) },
       systemPrompt: {
         section(section) {
@@ -205,7 +220,8 @@ test('DSH routes multiple independent tasks to ordinary sessions and preserves t
     return service;
   }
 
-  const caller = agent('assistant', 'zhaoye-assistant');
+  const caller = agent('assistant', 'cordis');
+  activePresets.set(caller.ctx, 'zhaoye-assistant');
   const outsider = agent('other-assistant', 'zhaoye-assistant');
   function invoke(name: string, input: object, asAgent = caller, callId = name) {
     const tool = tools.get(name) ?? assert.fail(`missing tool ${name}`);
@@ -215,6 +231,10 @@ test('DSH routes multiple independent tasks to ordinary sessions and preserves t
   try {
     const service = await mount();
     assert.equal((await service.doctor()).presence.state, 'active');
+    const diagnostics = (await invoke('zhaoye_doctor', {})) as Awaited<
+      ReturnType<DshService['doctor']>
+    >;
+    assert.equal(diagnostics.presence.state, 'active');
     await assert.rejects(invoke('zhaoye_delegate', { ...input, cwd: root }), {
       code: 'INVALID_INPUT',
     });

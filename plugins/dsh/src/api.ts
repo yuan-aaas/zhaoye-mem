@@ -24,6 +24,7 @@ export interface DshSession {
 }
 
 export interface DshAgent {
+  ctx: object;
   session: DshSession;
   status: string;
   inbox: {

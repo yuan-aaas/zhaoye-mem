@@ -8,6 +8,7 @@ import {
   type IdentityRollbackRequest,
   ZhaoyeError,
 } from '@zhaoye/contracts';
+import { runAssets } from './assets.js';
 import { cliHost, runBackup } from './backup.js';
 export async function run(
   args: string[] = process.argv.slice(2),
@@ -34,6 +35,10 @@ export async function run(
     return 2;
   };
   try {
+    if (args[0] === 'assets') {
+      output(await runAssets(args.slice(1)));
+      return 0;
+    }
     if (args[0] === 'backup') {
       output(await runBackup(args.slice(1)));
       return 0;
@@ -78,7 +83,7 @@ export async function run(
     }
     if (command !== 'init' && command !== 'identity') {
       return usage(
-        'Usage: zhaoye init | doctor | identity show/history/apply/rollback | presence | backup [--data-root path] [--json]',
+        'Usage: zhaoye init | doctor | identity show/history/apply/rollback | presence | backup | assets [--data-root path] [--json]',
       );
     }
     if (command === 'init' && (positional.length !== 1 || dry || release)) {

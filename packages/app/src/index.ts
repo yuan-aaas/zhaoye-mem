@@ -8,16 +8,19 @@ import {
 } from '@zhaoye/contracts';
 import { createIdentityService, renderIdentityMarkdown } from '@zhaoye/core';
 import {
+  createAssetStore,
   createPresence,
   ensureDataRoot,
   ioError,
   openDataRoot,
   openIdentityStore,
 } from '@zhaoye/storage';
+import { createAssetReader } from './assets.js';
 import { createBackupFacade } from './backup.js';
 import { doctor } from './doctor.js';
 export const packageName = '@zhaoye/app' as const;
 export { renderIdentityMarkdown } from '@zhaoye/core';
+export { openAssetLibrary } from './assets.js';
 export * from './doctor.js';
 export interface ZhaoyeConfig {
   dataRoot?: string;
@@ -103,6 +106,8 @@ export async function createZhaoye(config: ZhaoyeConfig) {
     listVersions: track(service.listVersions),
   };
   const backup = createBackupFacade(root, manifest.assistant_id, config.host.host_id, assertOwner);
+  const assetStore = createAssetStore(root, { now: () => clock.now(), assertOwner });
+  const assetReader = createAssetReader(assetStore);
   let heartbeat: Promise<void> = Promise.resolve();
   const timer = setInterval(() => {
     heartbeat = presence.heartbeat(instanceId).catch((e) => {
@@ -115,6 +120,14 @@ export async function createZhaoye(config: ZhaoyeConfig) {
     dataRoot: root,
     created,
     identity,
+    assets: {
+      list: track(assetReader.list),
+      files: track(assetReader.files),
+      read: track(assetReader.read),
+      verify: track(assetReader.verify),
+      initialize: track(assetStore.initialize),
+      registerConfigBundle: track(assetStore.registerConfigBundle),
+    },
     backup: {
       registerMneme: track(backup.registerMneme),
       importSnapshot: track(backup.importSnapshot),

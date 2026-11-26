@@ -1,4 +1,5 @@
 export const packageName = '@zhaoye/storage' as const;
+export * from './asset-store.js';
 export * from './atomic-fs.js';
 export * from './backup-db.js';
 export * from './data-root.js';

@@ -10,6 +10,7 @@ import {
   serializeIdentityDocument,
   ZhaoyeError,
 } from '@zhaoye/contracts';
+import { createAssetStore } from './asset-store.js';
 import {
   ensureDir,
   hashBytes,
@@ -19,6 +20,7 @@ import {
   readText,
   writeAtomic,
 } from './atomic-fs.js';
+import { initializeBackup } from './internal/backup-connection.js';
 import { resolveDataRoot } from './paths.js';
 export async function openDataRoot(
   dataRoot?: string,
@@ -105,6 +107,8 @@ export async function ensureDataRoot(
     );
     await writeAtomic(join(root, 'identity/operations.jsonl'), '');
     await writeAtomic(join(root, 'identity/identity.md'), render(doc));
+    await createAssetStore(root).initialize();
+    await initializeBackup(root);
     // Manifest is the final marker: interrupted initialization is never silently retried as empty.
     await writeAtomic(join(root, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
     return { root, manifest, created: true };

@@ -117,6 +117,15 @@ test('K-04 kernel requires confirmation AND dedicated entrypoint', async (t) => 
   delete (invalid.update as unknown as Record<string, unknown>).user_confirmed;
   await assert.rejects(app.identity.commitKernel(invalid, ctx), { code: 'UNAUTHORIZED' });
   await assert.rejects(app.identity.commit(req, ctx), { code: 'UNAUTHORIZED' });
+  const overBudget = request(1, {
+    section: 'safety_kernel',
+    principles: ['甲'.repeat(200), '乙'.repeat(120)],
+    user_confirmed: { confirmation_ref: 'user:approved' },
+  });
+  const before = await app.identity.read(ctx);
+  await assert.rejects(app.identity.preview(overBudget, ctx), { code: 'BUDGET_EXCEEDED' });
+  await assert.rejects(app.identity.commitKernel(overBudget, ctx), { code: 'BUDGET_EXCEEDED' });
+  assert.equal((await app.identity.read(ctx)).file_hash, before.file_hash);
   const result = await app.identity.commitKernel(req, ctx);
   assert.equal(result.receipt.section_revisions.safety_kernel, 2);
 });

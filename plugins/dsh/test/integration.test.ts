@@ -1,9 +1,16 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, realpath, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
-import { BUDGETS, createDefaultIdentity, LIMITS, SECTION_NAMES } from '@zhaoye/contracts';
+import { createZhaoye } from '@zhaoye/app';
+import {
+  BUDGETS,
+  createDefaultIdentity,
+  DSH_PERSONA_CODE_POINTS,
+  LIMITS,
+  SECTION_NAMES,
+} from '@zhaoye/contracts';
 import { apply, type DshPluginContext } from 'dsh-plugin-zhaoye';
 import { apply as mountAssistant } from 'dsh-plugin-zhaoye/assistant';
 import type {
@@ -18,8 +25,29 @@ import type { DshService } from '../dist/host.js';
 test('DSH keeps profile details out of fixed instructions and reads complete bounded pages', async () => {
   const at = '2026-11-25T00:00:00.000Z';
   const document = createDefaultIdentity('00000000-0000-4000-8000-000000000001', at);
-  document.safety_kernel.principles = Array.from({ length: LIMITS.principles }, (_, index) =>
-    String.fromCharCode(65 + index).repeat(LIMITS.principleText),
+  document.safety_kernel.principles = [
+    '甲'.repeat(LIMITS.principleText),
+    '乙'.repeat(DSH_PERSONA_CODE_POINTS.kernel - LIMITS.principleText - 1),
+  ];
+  const voice = '像同事一样说话，先说重点，细节等追问。';
+  const otherTrait = '按问题查看的详细性格条目';
+  document.character_profile.traits.push(
+    {
+      id: 'reply-style',
+      text: voice,
+      source: 'user_explicit',
+      confidence: 1,
+      evidence_refs: [],
+      updated_at: at,
+    },
+    {
+      id: 'reply-detail',
+      text: otherTrait,
+      source: 'user_explicit',
+      confidence: 1,
+      evidence_refs: [],
+      updated_at: at,
+    },
   );
   const detail = '仅按需读取的项目说明';
   document.project_state.projects.push({
@@ -43,6 +71,7 @@ test('DSH keeps profile details out of fixed instructions and reads complete bou
         return { document, revision: document.revision, file_hash: '', projection_path: '' };
       },
       doctor: () => assert.fail('unexpected diagnostics call'),
+      assets: () => assert.fail('unexpected asset call'),
       withTasks: () => assert.fail('unexpected task call'),
     },
     agentPresets: {
@@ -56,12 +85,15 @@ test('DSH keeps profile details out of fixed instructions and reads complete bou
     },
     logger: { warn: (message) => assert.fail(message) },
   });
-  assert.ok([...prompt()].length <= BUDGETS.fixedInjectionCodePoints);
+  assert.ok([...prompt()].length <= DSH_PERSONA_CODE_POINTS.fixed);
   for (const principle of document.safety_kernel.principles)
     assert.ok(prompt().includes(principle));
   assert.ok(!prompt().includes(detail));
+  assert.ok(prompt().includes(voice));
+  assert.ok(!prompt().includes(otherTrait));
 
-  const tool = tools.get('zhaoye_identity_read') ?? assert.fail('missing identity tool');
+  const tool = tools.get('zhaoye_identity_read') ?? assert.fail('missing identity read tool');
+  const findTool = tools.get('zhaoye_identity_find') ?? assert.fail('missing identity find tool');
   const agent: DshAgent = {
     ctx: agentContext,
     session: {
@@ -77,9 +109,24 @@ test('DSH keeps profile details out of fixed instructions and reads complete bou
       tool.execute(args, { agent, signal: new AbortController().signal, callId: 'identity' }),
     );
   }
+  function find(args: object) {
+    return Promise.resolve().then(() =>
+      findTool.execute(args, { agent, signal: new AbortController().signal, callId: 'find' }),
+    );
+  }
   await assert.rejects(read({}), { code: 'UNAUTHORIZED' });
+  await assert.rejects(find({ section: 'project_state', query: detail }), { code: 'UNAUTHORIZED' });
   activePreset = 'zhaoye-assistant';
   assert.deepEqual(await read({}), { revision: 1, sections: SECTION_NAMES });
+  const style = document.character_profile.traits[0] ?? assert.fail('missing style fixture');
+  style.source = 'model_inference';
+  await read({});
+  assert.ok(!prompt().includes(voice));
+  style.source = 'user_confirmation';
+  style.text = '长'.repeat(DSH_PERSONA_CODE_POINTS.replyStyle + 1);
+  await read({});
+  assert.ok(!prompt().includes(style.text));
+  style.text = voice;
   const first = { section: 'project_state', revision: '1' };
   type Page = { revision: number; section: string; content: string; next_cursor: string | null };
   let page = (await read(first)) as Page;
@@ -104,6 +151,59 @@ test('DSH keeps profile details out of fixed instructions and reads complete bou
   document.revision++;
   await assert.rejects(read(first), { code: 'CONFLICT' });
   await assert.rejects(read({ cursor: firstCursor }), { code: 'CONFLICT' });
+
+  const template = document.project_state.projects[0] ?? assert.fail('missing project fixture');
+  for (let index = 1; index < LIMITS.projects; index++) {
+    document.project_state.projects.push({
+      ...template,
+      project_id: `project-${index}`,
+      name: `同名项目 ${index}`,
+      progress: Array.from({ length: 12 }, () => '进度'.repeat(100)),
+      blockers: [`阻塞点 ${index}`],
+    });
+  }
+  const section = 'project_state';
+  const lastId = 'project-19';
+  const unchanged = { section, item_id: lastId, revision: '2', field: 'blockers' };
+  type FindResult = { status: string; hits: Array<{ item_id: string }>; more: boolean };
+  const hits = (await find({ section, query: 'ＰＲＯＪＥＣＴ-19' })) as FindResult;
+  assert.equal(hits.status, 'found');
+  assert.equal(hits.hits[0]?.item_id, lastId);
+  assert.deepEqual(JSON.parse(((await read(unchanged)) as Page).content), ['阻塞点 19']);
+  const ambiguous = (await find({ section, query: '同名项目' })) as FindResult;
+  assert.equal(ambiguous.status, 'ambiguous');
+  assert.equal(ambiguous.hits.length, 3);
+  assert.equal(ambiguous.more, true);
+  assert.ok([...JSON.stringify(ambiguous)].length <= DSH_PERSONA_CODE_POINTS.findResult);
+  assert.equal(((await find({ section, query: '无匹配' })) as FindResult).status, 'no_match');
+  await assert.rejects(read({ ...unchanged, item_id: 'missing' }), { code: 'NOT_FOUND' });
+  await assert.rejects(read({ ...unchanged, field: '__proto__' }), { code: 'INVALID_INPUT' });
+  await assert.rejects(read({ ...unchanged, cursor: firstCursor }), { code: 'INVALID_INPUT' });
+
+  type ItemPage = { content: string; next_offset: string | null };
+  const progress = { ...unchanged, field: 'progress' };
+  let itemPage = (await read(progress)) as ItemPage;
+  const progressChunks: string[] = [];
+  const resume = itemPage.next_offset;
+  while (true) {
+    assert.ok([...JSON.stringify(itemPage)].length <= BUDGETS.toolResultCodePoints);
+    progressChunks.push(itemPage.content);
+    if (itemPage.next_offset === null) break;
+    assert.ok(progressChunks.length < 10, 'item pagination did not complete');
+    itemPage = (await read({ ...progress, offset: itemPage.next_offset })) as ItemPage;
+  }
+  assert.ok(resume);
+  assert.deepEqual(
+    JSON.parse(progressChunks.join('')),
+    document.project_state.projects.at(-1)?.progress,
+  );
+  document.revision++;
+  await assert.rejects(read({ ...progress, offset: resume }), { code: 'CONFLICT' });
+  assert.ok(!prompt().includes('阻塞点 19'));
+
+  document.safety_kernel.principles[1] += '超';
+  await assert.rejects(read({}), { code: 'BUDGET_EXCEEDED' });
+  assert.throws(() => prompt(), { code: 'BUDGET_EXCEEDED' });
   activePreset = undefined;
   agent.session.header.agentPreset = 'zhaoye-assistant';
   await assert.rejects(read({}), { code: 'UNAUTHORIZED' });
@@ -212,7 +312,7 @@ test('DSH routes multiple independent tasks to ordinary sessions and preserves t
       systemPrompt: {
         section(section) {
           assert.match(section.text(), /安全内核/);
-          assert.ok([...section.text()].length <= 2800);
+          assert.ok([...section.text()].length <= DSH_PERSONA_CODE_POINTS.fixed);
         },
       },
       logger: ctx.logger,
@@ -229,12 +329,67 @@ test('DSH routes multiple independent tasks to ordinary sessions and preserves t
   }
   const input = { goal: '读取项目文件', acceptance: '报告结果' };
   try {
+    const rootOwner = await createZhaoye({
+      dataRoot: root,
+      host: {
+        host_id: 'cli',
+        display_name: 'Test',
+        capabilities: [],
+        adapter_version: '0.1.0',
+        data_schema: 1,
+      },
+    });
+    const assetId = 'config';
+    const assetBody = '"\\\n🚀'.repeat(300);
+    try {
+      const bundle = join(root, 'assets', 'files', assetId);
+      await mkdir(bundle);
+      await writeFile(
+        join(bundle, 'manifest.json'),
+        '{"name":"Config","description":"","version":"1.0.0","modules":{}}',
+      );
+      await writeFile(join(bundle, 'README.md'), assetBody);
+      await rootOwner.assets.registerConfigBundle(assetId);
+    } finally {
+      await rootOwner.close();
+    }
     const service = await mount();
     assert.equal((await service.doctor()).presence.state, 'active');
     const diagnostics = (await invoke('zhaoye_doctor', {})) as Awaited<
       ReturnType<DshService['doctor']>
     >;
     assert.equal(diagnostics.presence.state, 'active');
+    const find = 'zhaoye_asset_find';
+    const read = 'zhaoye_asset_read';
+    assert.deepEqual(await invoke(find, { asset_id: assetId, query: 'readme' }), {
+      asset_id: assetId,
+      items: ['README.md'],
+      next_offset: null,
+    });
+    const loc = { asset_id: assetId, path: 'README.md' };
+    type Page = { content: string; sha256: string; next_offset: string | null };
+    let page = (await invoke(read, loc)) as Page;
+    assert.ok(page.next_offset);
+    await assert.rejects(invoke(read, { ...loc, offset: page.next_offset }), {
+      code: 'INVALID_INPUT',
+    });
+    await assert.rejects(
+      invoke(read, { ...loc, offset: page.next_offset, sha256: '0'.repeat(64) }),
+      { code: 'CONFLICT' },
+    );
+    const chunks: string[] = [];
+    while (true) {
+      assert.ok([...JSON.stringify(page)].length <= BUDGETS.toolResultCodePoints);
+      chunks.push(page.content);
+      if (page.next_offset === null) break;
+      assert.ok(chunks.length < 10);
+      page = (await invoke(read, {
+        ...loc,
+        offset: page.next_offset,
+        sha256: page.sha256,
+      })) as Page;
+    }
+    assert.equal(chunks.join(''), assetBody);
     await assert.rejects(invoke('zhaoye_delegate', { ...input, cwd: root }), {
       code: 'INVALID_INPUT',
     });
@@ -251,6 +406,7 @@ test('DSH routes multiple independent tasks to ordinary sessions and preserves t
     assert.equal(worker.session.header.agentPreset, 'standard');
     const query = { task_id: launched.task_id };
     await assert.rejects(invoke('zhaoye_identity_read', {}, worker), { code: 'UNAUTHORIZED' });
+    await assert.rejects(invoke(find, {}, worker), { code: 'UNAUTHORIZED' });
     await assert.rejects(invoke('zhaoye_task_status', query, outsider), { code: 'NOT_FOUND' });
     const crossProject = agent('cross-project', 'standard');
     crossProject.session.header.cwd = dirname(root);

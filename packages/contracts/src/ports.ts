@@ -1,3 +1,4 @@
+import type { IdentityUpdate } from './identity.js';
 import type { TaskPacket } from './receipts.js';
 
 export interface ClockPort {
@@ -17,6 +18,23 @@ export interface ModelResponse {
 
 export interface ModelPort {
   complete(request: ModelRequest): Promise<ModelResponse>;
+}
+
+export interface ProfileEvolutionInput {
+  assistant_id: string;
+  base_revision: number;
+  evidence_refs: readonly string[];
+  trigger: { kind: 'user' | 'session'; id: string };
+}
+
+export interface ProfileEvolutionCandidate {
+  update: Extract<IdentityUpdate, { section: 'user_profile' | 'character_profile' }>;
+  confidence: number;
+  evidence_refs: readonly string[];
+}
+
+export interface ProfileEvolutionPort {
+  propose(input: ProfileEvolutionInput): Promise<readonly ProfileEvolutionCandidate[]>;
 }
 
 export interface WorkerStatus {

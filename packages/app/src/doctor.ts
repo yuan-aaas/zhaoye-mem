@@ -1,6 +1,7 @@
 import { type OwnerInfo, ZhaoyeError } from '@zhaoye/contracts';
 import { renderIdentityMarkdown } from '@zhaoye/core';
 import {
+  createAssetStore,
   createPresence,
   isStale,
   openBackupDb,
@@ -72,6 +73,14 @@ export async function doctor(dataRoot?: string): Promise<DoctorReport> {
         );
     } else await store.findOperation('');
     check('history', 'ok', '已检查快照与操作记录');
+    try {
+      const registry = await createAssetStore(root).scan();
+      check('assets', 'ok', `个人资产清单可读，已登记 ${registry.assets.length} 项`);
+    } catch (e) {
+      if (e instanceof ZhaoyeError && e.code === 'NOT_FOUND')
+        check('assets', 'ok', '个人资产库尚未初始化');
+      else check('assets', 'fail', e instanceof ZhaoyeError ? e.code : String(e));
+    }
     try {
       const backup = await openBackupDb(root);
       backup.close();

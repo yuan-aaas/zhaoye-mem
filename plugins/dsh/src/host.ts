@@ -1,8 +1,8 @@
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
-import { createZhaoye, doctor, type Zhaoye } from '@zhaoye/app';
-import { ZhaoyeError } from '@zhaoye/contracts';
+import { createZhaoye, doctor, openAssetLibrary, type Zhaoye } from '@zhaoye/app';
+import { ActorContextSchema, ZhaoyeError } from '@zhaoye/contracts';
 import type {
   DshAgent,
   DshApproval,
@@ -42,11 +42,13 @@ interface PluginConfig {
   dataRoot?: string;
   initIfMissing?: boolean;
   projectRoots?: Record<string, string>;
+  allowedIdentityProjects?: string[];
   allowedTargetSessions?: Record<string, string[]>;
 }
 
 export interface DshService {
   identity(sessionId: string): ReturnType<Zhaoye['identity']['read']>;
+  assets(): ReturnType<typeof openAssetLibrary>;
   doctor(): ReturnType<typeof doctor>;
   withTasks<T>(operation: (service: TaskService) => Promise<T>): Promise<T>;
 }
@@ -64,6 +66,16 @@ export function apply(ctx: DshPluginContext, config: PluginConfig = {}): void {
   }
   const dataRoot = explicitRoot ?? join(homedir(), '.zhaoye');
   const projectRoots = new Map(Object.entries(config.projectRoots ?? {}));
+  const identityProjects = ActorContextSchema.shape.granted_project_ids.safeParse(
+    config.allowedIdentityProjects === undefined ? '*' : config.allowedIdentityProjects,
+  );
+  if (
+    !identityProjects.success ||
+    (config.allowedIdentityProjects !== undefined && !Array.isArray(config.allowedIdentityProjects))
+  ) {
+    throw new ZhaoyeError('INVALID_INPUT', 'allowedIdentityProjects 必须是有效的项目 ID 列表');
+  }
+  const projectGrants = identityProjects.data === '*' ? undefined : new Set(identityProjects.data);
   const targetGrants = new Map<string, ReadonlySet<string>>();
   for (const [owner, targets] of Object.entries(config.allowedTargetSessions ?? {})) {
     if (
@@ -105,16 +117,23 @@ export function apply(ctx: DshPluginContext, config: PluginConfig = {}): void {
   const service: DshService = {
     async identity(sessionId) {
       const app = await open();
-      return app.identity.read({
+      const snapshot = await app.identity.read({
         adapter_id: 'dsh-plugin-zhaoye',
         host: 'dsh',
         session_id: sessionId,
         scope_id: app.assistantId,
-        granted_project_ids: [],
+        granted_project_ids: identityProjects.data,
         granted_source_ids: [],
       });
+      if (projectGrants) {
+        snapshot.document.project_state.projects = snapshot.document.project_state.projects.filter(
+          (project) => projectGrants.has(project.project_id),
+        );
+      }
+      return snapshot;
     },
     doctor: () => doctor(dataRoot),
+    assets: () => openAssetLibrary(dataRoot),
     async withTasks(operation) {
       const pending = open().then((app) => {
         tasks ??= new TaskService(app.dataRoot, ctx, projectRoots, targetGrants);
@@ -164,6 +183,12 @@ export function apply(ctx: DshPluginContext, config: PluginConfig = {}): void {
       await app?.close();
     }
   });
+
+  if (config.initIfMissing === true) {
+    void open().catch((error: unknown) => {
+      ctx.logger.warn(`照夜数据根暂不可用：${String(error)}`);
+    });
+  }
 
   if (existsSync(join(dataRoot, taskDatabaseName))) {
     void service

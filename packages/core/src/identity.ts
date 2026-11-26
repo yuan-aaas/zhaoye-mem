@@ -13,6 +13,7 @@ import {
   type IdentityStore,
   type IdentityUpdate,
   parseInput,
+  renderBoundedSafetyKernel,
   SECTION_NAMES,
   type SectionName,
   serializeIdentityDocument,
@@ -90,6 +91,7 @@ function finalize(
   };
   if (JSON.stringify(strip(current[section])) === JSON.stringify(strip(next[section])))
     throw new ZhaoyeError('INVALID_INPUT', '更新未改变内容');
+  if (section === 'safety_kernel') renderBoundedSafetyKernel(next.safety_kernel.principles);
   next[section].revision = current[section].revision + 1;
   next[section].updated_at = at;
   next.revision = current.revision + 1;

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, rmdir, stat, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -106,8 +106,17 @@ async function publish(
   return db.publishBatch({ batchId, status, records, readCount: records.length, rejectedCount: 0 });
 }
 
-test('MC-2 only explicit creation migrates a backup root and reopen preserves WAL and its schema', async (t) => {
+test('MC-2 new roots have an empty WAL backup and legacy roots require explicit creation', async (t) => {
   const { root, file, connect } = await fixture(t);
+  assert.deepEqual(await readdir(join(root, 'backup', 'exports')), []);
+  const initial = await connect('read');
+  await initial.verify();
+  initial.close();
+  await unlink(file);
+  await rm(`${file}-wal`, { force: true });
+  await rm(`${file}-shm`, { force: true });
+  await rmdir(join(root, 'backup', 'exports'));
+  await rmdir(join(root, 'backup'));
   await assert.rejects(openBackupDb(root), { code: 'NOT_FOUND' });
   await assert.rejects(stat(join(root, 'backup')), { code: 'ENOENT' });
   const db = await connect();
@@ -124,7 +133,7 @@ test('MC-2 only explicit creation migrates a backup root and reopen preserves WA
 
 test('MC-2 never migrates an unrelated or unknown SQLite schema', async (t) => {
   const { root, file } = await fixture(t);
-  await mkdir(join(root, 'backup'));
+  await unlink(file);
   const raw = new DatabaseSync(file);
   try {
     raw.exec('CREATE TABLE unrelated(value TEXT)');

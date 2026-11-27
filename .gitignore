@@ -15,6 +15,9 @@ coverage/
 .idea/
 .vscode/
 
+# local design notes and presentation materials
+/docs/
+
 # OS noise
 .DS_Store
 Thumbs.db

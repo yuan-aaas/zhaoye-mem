@@ -3,9 +3,14 @@ export const standardPreset = 'standard';
 
 export interface SessionEvent {
   seq: number;
+  time?: number;
   type: string;
   data: {
     turn?: number;
+    id?: string;
+    role?: string;
+    agentPreset?: string;
+    content?: Array<{ type: string; text?: string }>;
     source?: { kind?: string; rpcId?: string };
     reason?: { kind: string; reason?: { kind: string }; error?: { code?: string } };
   };

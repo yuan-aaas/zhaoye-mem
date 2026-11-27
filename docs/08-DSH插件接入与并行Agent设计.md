@@ -82,7 +82,9 @@ flowchart LR
 
 ### 自迭代入口与生命周期
 
-为应用层预留 `ProfileEvolutionPort.propose(input)` 契约。输入为 `assistant_id`、`base_revision`、`evidence_refs` 和用户或会话触发来源。输出限定为用户画像或助手性格的候选变更，携带置信度和证据引用。以后经策略、版本冲突和来源校验，才可由既有人格更新入口提交。当前只有接口类型，助手对话和查证过程独立运作。
+照夜通过 `zhaoye_preference_remember` 将明确的长期偏好写入版本化画像。应用层核对证据与作用域，保留候选和提交回执。`ProfileEvolutionPort.propose(input)` 保留给后续接入的模型候选提取器。
+
+即时写入、记忆偏好回填、增量批次和周五同步提醒的开发方案见 [10 画像自迭代与增量记忆同步](10-画像自迭代与增量记忆同步开发设计.md)。
 
 隔离验收使用显式测试数据根，加载照夜与原生 Mneme。先完成普通对话，再验证显式查询与主动查证的搜索、ID 读回和有据回答，最后验证空命中及查询失败。记录宿主版本、模型类型、工具轨迹及请求峰值。正式模型行为和 token 计量分别验收。
 
@@ -149,6 +151,12 @@ dsh plugin --profile zhaoye-dev add "link:$zhaoyePluginPath"
 启动该 profile 后选用「照夜助手」preset。传入 `project_id` 时按 `projectRoots` 解析，省略时使用助手的当前工作区。传入 `target_session_id` 时继续指定对话，省略时在所选工作区新建标准对话。给多个会话派发时每个目标各提交一次。内部执行回执位于照夜数据根的 `dsh-tasks.sqlite`，正文和产物由各目标会话保存。
 
 ## 7. 正式安装与个人数据
+
+### 侧栏入口
+
+DSH **0.2.2-rc.5** 起可从左侧栏全局面板列表中的「照夜」打开独立设置弹窗。「照夜」与插件市场使用同一个 `sidebar.panellist` 插槽。弹窗跟随 DSH 主题。可用「选择本地目录」，也可输入数据根绝对路径后按 Enter 或移开焦点。有效目录通过检查后立即启用，空目录可通过「初始化目录」准备。照夜正在对话或处理任务时，等工作结束再切换。弹窗展示 `identity/`、`backup/` 和 `assets/` 的实际路径及检查状态。
+
+三部分检查通过且照夜预设可用后，「开始对话」使用 DSH 的会话接口创建空会话，直接选中照夜预设。模型沿用 DSH 的默认设置。弹窗也会列出个人资产库 `assets/files/<配置包>/01-skills/<技能>/SKILL.md` 中的待安装技能，用户可逐项安装到 DSH 的技能目录。新数据根的首次照夜会话会显示尚未安装的技能及弹窗入口。
 
 **一次安装完成代码部署。** 发布者构建一个 DSH 组合包，包含 Cordis 配置层、DSH 适配入口和照夜中间框架的运行时代码。构建时把所需的 `@zhaoye/*` 内部模块打入同一个发布包，保留主入口和 `./assistant` 入口。用户安装发布版本时，DSH 从配置的软件源下载该包和公开运行时依赖，组合包自动加入当前 profile。安装产物必须能在没有照夜源码仓库和 workspace 依赖的机器上启动。 [发布单元决策](决策记录/0001-单仓多包与多适配器发布.md) · [DSH 组合包安装](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/user/develop/basic/publish.zh.md)
 

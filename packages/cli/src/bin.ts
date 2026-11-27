@@ -81,14 +81,23 @@ export async function run(
       output(command === 'doctor' ? report : report.presence);
       return report.checks.some((c) => c.status === 'fail') ? 5 : 0;
     }
-    if (command !== 'init' && command !== 'identity') {
+    if (command !== 'init' && command !== 'identity' && command !== 'preference') {
       return usage(
-        'Usage: zhaoye init | doctor | identity show/history/apply/rollback | presence | backup | assets [--data-root path] [--json]',
+        'Usage: zhaoye init | doctor | identity show/history/apply/rollback | preference list/apply/reject | presence | backup | assets [--data-root path] [--json]',
       );
     }
     if (command === 'init' && (positional.length !== 1 || dry || release)) {
       return usage('init 参数不正确');
     }
+    if (
+      command === 'preference' &&
+      (dry ||
+        release ||
+        (sub === 'list'
+          ? positional.length !== 2
+          : (sub !== 'apply' && sub !== 'reject') || positional.length !== 3))
+    )
+      return usage('preference 参数不正确');
     if (
       command === 'identity' &&
       (!['show', 'history', 'apply', 'rollback'].includes(sub ?? '') ||
@@ -122,7 +131,13 @@ export async function run(
       };
       if (command === 'init')
         output({ created: app.created, data_root: app.dataRoot, assistant_id: app.assistantId });
-      else if (sub === 'show') {
+      else if (command === 'preference') {
+        output(
+          sub === 'list'
+            ? (await app.evolution.list(ctx)).slice(0, limit)
+            : await app.evolution.review(file as string, sub as 'apply' | 'reject', ctx),
+        );
+      } else if (sub === 'show') {
         const snapshot = await app.identity.read(ctx);
         if (json) output(snapshot.document);
         else output(renderIdentityMarkdown(snapshot.document));

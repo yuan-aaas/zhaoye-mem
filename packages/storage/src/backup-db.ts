@@ -24,6 +24,7 @@ import {
   copyBackupArtifacts,
   fileDigest,
   readBackupManifest,
+  readSyncPublication,
 } from './internal/backup-artifacts.js';
 import {
   databasePath,
@@ -31,7 +32,12 @@ import {
   sqliteError,
   transaction,
 } from './internal/backup-connection.js';
-import { listBackupBatches, readBackupRecords, searchBackupRows } from './internal/backup-query.js';
+import {
+  effectiveObservations,
+  listBackupBatches,
+  readBackupRecords,
+  searchBackupRows,
+} from './internal/backup-query.js';
 
 interface BatchRow {
   batch_id: string;
@@ -46,6 +52,7 @@ interface BatchRow {
   raw_manifest: string | null;
   raw_sha256: string | null;
   receipt_json: string | null;
+  capture_seq: number | null;
 }
 
 const canonicalJson = (value: unknown) =>
@@ -188,8 +195,8 @@ function recordAbsences(db: DatabaseSync, batchId: string, previous: string): nu
       CASE WHEN old.visibility='deleted' THEN 'deleted' ELSE 'unavailable' END,
       CASE WHEN old.visibility='deleted' THEN old.visibility_reason ELSE 'source_absent' END,
       old.source_updated_at, NULL, old.metadata_json
-    FROM batch_records old
-    WHERE old.batch_id=? AND NOT EXISTS (
+    FROM (${effectiveObservations}) old
+    WHERE NOT EXISTS (
       SELECT 1 FROM batch_records seen WHERE seen.batch_id=? AND seen.record_id=old.record_id
     )
   `)
@@ -260,6 +267,35 @@ async function verifyDatabase(root: string, db: DatabaseSync): Promise<BackupMan
         !matchesBatch(manifest, batch)
       )
         throw failure('批次清单与备份库不一致');
+      if (batch.source_format === 'mneme-delta/v1') {
+        if (
+          !manifest.parentBatchId ||
+          manifest.parentBatchId !== receipt.previousCompleteBatchId ||
+          manifest.artifact.name !== 'source.ndjson' ||
+          batch.status !== 'complete'
+        )
+          throw failure('增量批次的父批次或格式不一致');
+        const parent = findBatch(db, manifest.parentBatchId);
+        if (
+          parent.status !== 'complete' ||
+          parent.source_id !== batch.source_id ||
+          parent.scope_key !== batch.scope_key ||
+          !parent.capture_seq ||
+          !batch.capture_seq ||
+          parent.capture_seq >= batch.capture_seq
+        )
+          throw failure('增量父批次不在同一有效同步链');
+      } else if (manifest.parentBatchId) {
+        throw failure('完整快照包含了增量父批次');
+      }
+      if (['mneme-baseline/v1', 'mneme-delta/v1'].includes(batch.source_format)) {
+        const publication = await readSyncPublication(root, manifest);
+        if (
+          publication.readCount !== receipt.readCount ||
+          publication.records.length !== receipt.recordCount
+        )
+          throw failure('同步差异文件与备份回执计数不一致');
+      }
       manifests.push(manifest);
     }
     return manifests;
@@ -476,14 +512,31 @@ export async function openBackupDb(
         throw new ZhaoyeError('INTEGRITY_FAILED', '原件格式或范围与导入请求不一致', { batchId });
       if (status === 'complete' && manifest.declaredCoverage !== 'complete')
         throw new ZhaoyeError('IMPORT_INCOMPLETE', '部分覆盖的原件不能发布为完整批次', { batchId });
+      if (['mneme-baseline/v1', 'mneme-delta/v1'].includes(pending.source_format)) {
+        const artifact = await readSyncPublication(root, manifest);
+        if (canonicalJson(artifact) !== canonicalJson(publication))
+          throw new ZhaoyeError('INTEGRITY_FAILED', '待登记记录与同步差异文件不一致');
+      }
       return write(() => {
         const batch = findBatch(db, batchId);
         if (batch.status !== 'running') return terminalReceipt(batch);
         const previous = completeBatch(db, batch.source_id, batch.scope_key);
         const advancesHead = status === 'complete' && batch.capture_mode === 'live';
+        const delta = batch.source_format === 'mneme-delta/v1';
+        if (
+          delta &&
+          (!advancesHead ||
+            !manifest.parentBatchId ||
+            manifest.parentBatchId !== previous ||
+            manifest.artifact.name !== 'source.ndjson')
+        )
+          throw new ZhaoyeError('CONFLICT', '增量父批次已变化或增量清单无效');
+        if (!delta && manifest.parentBatchId)
+          throw new ZhaoyeError('INVALID_INPUT', '完整快照不能指定增量父批次');
         const now = new Date().toISOString();
         const newVersionCount = observeRecords(db, batch, records, now);
-        const absentCount = advancesHead && previous ? recordAbsences(db, batchId, previous) : 0;
+        const absentCount =
+          advancesHead && previous && !delta ? recordAbsences(db, batchId, previous) : 0;
         db.prepare(`
           UPDATE import_batches
           SET status=?, captured_at=?, captured_at_kind=?, finished_at=?, raw_manifest=?, raw_sha256=?,
@@ -596,6 +649,101 @@ export async function openBackupDb(
         return rows.length;
       }),
     getCompleteBatch: (sourceId, scopeKey) => run(() => completeBatch(db, sourceId, scopeKey)),
+    async recoverPendingSyncBatches() {
+      if (mode === 'read') throw new ZhaoyeError('UNAUTHORIZED', '备份库以只读模式打开');
+      const receipts = run(() =>
+        db
+          .prepare(`
+        SELECT batch_id FROM import_batches WHERE status='running'
+          AND source_format IN ('mneme-baseline/v1','mneme-delta/v1') ORDER BY started_at
+      `)
+          .all(),
+      );
+      for (const row of receipts) {
+        const id = row.batch_id as string;
+        try {
+          const manifest = await readBackupManifest(root, id);
+          await publishBatch(await readSyncPublication(root, manifest));
+        } catch (error) {
+          if (
+            !(error instanceof ZhaoyeError) ||
+            !['INTEGRITY_FAILED', 'CONFLICT', 'INVALID_INPUT'].includes(error.code)
+          )
+            throw error;
+          write(() => failRunningBatch(findBatch(db, id), error.code));
+        }
+      }
+    },
+    getSyncOperation: (operationId, adapterId, sourceId, scopeKey) =>
+      run(() => {
+        const row = db
+          .prepare('SELECT batch_id, adapter_id FROM backup_operations WHERE operation_id=?')
+          .get(operationId);
+        if (!row) return null;
+        if (row.adapter_id !== adapterId)
+          throw new ZhaoyeError('UNAUTHORIZED', '备份操作属于另一个适配器');
+        const batch = findBatch(db, row.batch_id as string);
+        if (
+          batch.source_id !== sourceId ||
+          batch.scope_key !== scopeKey ||
+          !['mneme-baseline/v1', 'mneme-delta/v1'].includes(batch.source_format)
+        )
+          throw new ZhaoyeError('CONFLICT', '同步操作与先前的来源、范围或格式不同');
+        return batch.status === 'running'
+          ? { batchId: batch.batch_id, status: 'running', created: false }
+          : terminalReceipt(batch);
+      }),
+    listSyncBatches: (sourceId, scopeKey, afterBatchId) =>
+      run(() =>
+        db
+          .prepare(`
+        SELECT b.batch_id FROM import_batches b
+        WHERE b.source_id=? AND b.scope_key=? AND b.status='complete' AND b.capture_mode='live'
+          AND b.capture_seq>coalesce((SELECT capture_seq FROM import_batches WHERE batch_id=?),0)
+          AND (b.source_format IN ('mneme-baseline/v1','mneme-delta/v1') OR b.batch_id=(
+            SELECT p.batch_id FROM import_batches p
+            WHERE p.source_id=b.source_id AND p.scope_key=b.scope_key AND p.status='complete'
+              AND p.capture_mode='live' AND p.source_format NOT IN ('mneme-baseline/v1','mneme-delta/v1')
+            ORDER BY p.capture_seq DESC LIMIT 1
+          ))
+        ORDER BY b.capture_seq
+      `)
+          .all(sourceId, scopeKey, afterBatchId ?? null)
+          .map((row) => row.batch_id as string),
+      ),
+    readObservations: (batchId, inherited) =>
+      run(() => {
+        const observations = inherited
+          ? effectiveObservations
+          : 'SELECT * FROM batch_records WHERE batch_id=?';
+        return db
+          .prepare(`
+        SELECT r.*, s.native_id, v.title, v.body, v.kind
+        FROM (${observations}) r JOIN source_records s USING(record_id)
+        LEFT JOIN record_versions v ON v.version_id=r.version_id
+      `)
+          .all(batchId)
+          .map(
+            (row): BackupObservation => ({
+              nativeId: row.native_id as string,
+              content:
+                row.kind === null
+                  ? null
+                  : {
+                      kind: row.kind as string,
+                      title: row.title as string,
+                      body: row.body as string,
+                    },
+              projectId: row.project_id as string | null,
+              searchAllowed: row.search_allowed === 1,
+              visibility: row.visibility as BackupObservation['visibility'],
+              reason: row.visibility_reason as string | null,
+              sourceUpdatedAt: row.source_updated_at as string | null,
+              rawRef: row.raw_ref as string | null,
+              metadata: JSON.parse(row.metadata_json as string),
+            }),
+          );
+      }),
     listBatches: (access) => run(() => listBackupBatches(db, access)),
     readRecords: (access, recordId) =>
       run(() => readTransaction(db, () => readBackupRecords(db, access, recordId))),

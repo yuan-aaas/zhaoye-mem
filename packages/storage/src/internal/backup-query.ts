@@ -17,6 +17,25 @@ type Row = Omit<BackupDetail, 'batch' | 'metadata' | 'snippet'> & {
   metadata_json: string;
 };
 
+/** One effective observation per record. Snapshot batches terminate the chain. */
+export const effectiveObservations = `
+  WITH RECURSIVE chain(id, depth) AS (
+    SELECT ?, 0
+    UNION ALL
+    SELECT p.batch_id, c.depth+1 FROM chain c
+    JOIN import_batches b ON b.batch_id=c.id
+    JOIN backup_operations o ON o.batch_id=b.batch_id
+    JOIN import_batches p ON p.batch_id=json_extract(o.receipt_json,'$.previousCompleteBatchId')
+      AND p.source_id=b.source_id AND p.scope_key=b.scope_key AND p.capture_seq<b.capture_seq
+      AND p.status='complete'
+    WHERE b.source_format='mneme-delta/v1'
+  )
+  SELECT * FROM (
+    SELECT r.*, row_number() OVER (PARTITION BY r.record_id ORDER BY c.depth) AS row_rank
+    FROM chain c JOIN batch_records r ON r.batch_id=c.id
+  ) WHERE row_rank=1
+`;
+
 function projectFilter(access: BackupAccess): [string, SQLInputValue[]] {
   return [
     `((r.project_id IS NULL AND ?) OR
@@ -76,9 +95,9 @@ function candidateQuery(access: BackupAccess, batchId: string) {
     sql: `SELECT r.record_id, r.version_id, r.source_id, r.project_id, r.visibility, i.native_id,
       r.source_updated_at, r.metadata_json, v.title, v.body, v.kind, v.content_hash,
       b.batch_id, b.captured_at, b.finished_at, b.status
-    FROM batch_records r JOIN import_batches b USING(batch_id)
+    FROM (${effectiveObservations}) r JOIN import_batches b ON b.batch_id=?
     JOIN record_versions v ON v.version_id=r.version_id JOIN source_records i ON i.record_id=r.record_id
-    WHERE r.batch_id=? AND r.search_allowed=1 AND ${projects}
+    WHERE r.search_allowed=1 AND ${projects}
       AND (r.visibility='visible' OR (? AND r.visibility_reason IN ('archived','forgotten','archived_forgotten')))
       AND NOT EXISTS (
         SELECT 1 FROM batch_records latest JOIN import_batches lb ON lb.batch_id=latest.batch_id
@@ -93,7 +112,7 @@ function candidateQuery(access: BackupAccess, batchId: string) {
             OR (latest.visibility<>'visible' AND (NOT ? OR latest.visibility_reason NOT IN ('archived','forgotten','archived_forgotten')
               OR latest.visibility_reason IS NULL)))
       )`,
-    args: [batchId, ...args, Number(access.history), Number(access.history)],
+    args: [batchId, batchId, ...args, Number(access.history), Number(access.history)],
   };
 }
 

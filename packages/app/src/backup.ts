@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -7,9 +8,12 @@ import {
   type BackupAccess,
   BackupAccessSchema,
   type BackupDb,
+  type BackupObservation,
   type BackupSearch,
   BackupSearchSchema,
   type BackupSource,
+  type BackupSyncState,
+  BackupSyncStateSchema,
   MnemePolicySchema,
   ZhaoyeError,
 } from '@zhaoye/contracts';
@@ -23,8 +27,13 @@ import {
   captureMnemeFile,
   hashBytes,
   openBackupDb,
+  readJson,
+  readText,
   resolveMnemeFile,
+  scanMnemeChanges,
+  writeAtomic,
   writeMnemeExport,
+  writeMnemeSync,
 } from '@zhaoye/storage';
 
 function authorize(ctx: ActorContext, scope: string, adapter: string, source?: string) {
@@ -55,14 +64,33 @@ export function createBackupFacade(
   adapter: string,
   assertOwner: () => Promise<void>,
 ) {
-  let recovered = false;
+  let recovery: Promise<void> | undefined;
+  const syncing = new Map<
+    string,
+    Promise<{
+      status: 'complete' | 'unchanged';
+      sourceId: string;
+      batchId: string;
+      changed: number;
+      absent: number;
+      preferenceError: string | undefined;
+    }>
+  >();
   async function withDb<T>(write: boolean, work: (db: BackupDb) => T | Promise<T>) {
     if (write) await assertOwner();
     const db = await openBackupDb(root, { mode: write ? 'create' : 'read' });
     try {
-      if (write && !recovered) {
-        db.recoverInterruptedBatches();
-        recovered = true;
+      if (write) {
+        recovery ??= db
+          .recoverPendingSyncBatches()
+          .then(() => {
+            db.recoverInterruptedBatches();
+          })
+          .catch((error: unknown) => {
+            recovery = undefined;
+            throw error;
+          });
+        await recovery;
       }
       return await work(db);
     } finally {
@@ -79,6 +107,180 @@ export function createBackupFacade(
     if (!source || source.scopeId !== scope || source.kind !== 'mneme')
       throw new ZhaoyeError('NOT_FOUND', '当前范围没有该 Mneme 来源');
     return source;
+  }
+  function syncFile(source: BackupSource) {
+    return join(
+      root,
+      'backup',
+      `sync-${hashBytes(JSON.stringify([source.sourceId, scopeKey(source)]))}.json`,
+    );
+  }
+  async function syncState(source: BackupSource): Promise<BackupSyncState> {
+    const path = syncFile(source);
+    return (await readText(path)) === null ? {} : readJson(path, BackupSyncStateSchema);
+  }
+  async function sourceBinding(file: string) {
+    const info = await stat(file, { bigint: true });
+    return hashBytes(
+      JSON.stringify([file, info.dev.toString(), info.ino.toString(), info.birthtimeNs.toString()]),
+    );
+  }
+  type SyncInput = { sourceId: string; operationId: string; evolve?: boolean };
+  async function sync(
+    input: SyncInput,
+    onPreference: ((source: string, row: BackupObservation) => Promise<void>) | undefined,
+  ) {
+    return withDb(true, async (db) => {
+      const source = sourceOf(db, input.sourceId);
+      const policy = policyOf(source.policy);
+      const key = scopeKey(source);
+      const state = await syncState(source);
+      async function save() {
+        await assertOwner();
+        await writeAtomic(syncFile(source), `${JSON.stringify(state)}\n`);
+      }
+      let started: string | undefined;
+      let completed = false;
+      let changed = 0;
+      let absent = 0;
+      try {
+        const previous = db.getCompleteBatch(source.sourceId, key);
+        let current = previous;
+        const replay = db.getSyncOperation(input.operationId, adapter, source.sourceId, key);
+        if (replay) {
+          if (replay.status !== 'complete')
+            throw new ZhaoyeError('CONFLICT', '先前同步未完成，请用新的操作 ID 重试');
+          current = replay.batchId;
+          changed = replay.recordCount;
+          absent = db
+            .readObservations(current, false)
+            .filter((row) => row.reason === 'source_absent').length;
+          completed = true;
+          if (replay.capturedAt && (!state.succeededAt || replay.capturedAt > state.succeededAt)) {
+            state.succeededAt = replay.capturedAt;
+            state.checkedAt = replay.capturedAt;
+            state.batchId = current;
+            state.changed = changed;
+            state.absent = absent;
+            delete state.error;
+            await save();
+          }
+        } else {
+          if (typeof source.policy.file !== 'string')
+            throw new ZhaoyeError('SOURCE_UNAVAILABLE', 'Mneme 来源缺少文件绑定');
+          const file = await resolveMnemeFile(root, source.policy.file);
+          const binding = await sourceBinding(file);
+          if (state.binding && state.binding !== binding && previous)
+            throw new ZhaoyeError('SOURCE_UNAVAILABLE', 'Mneme 文件已被替换，请重新登记为新来源');
+          state.binding = binding;
+          await save();
+          const capture = {
+            root,
+            file,
+            required: requiredMnemeColumns(policy),
+            optional: MNEME_METADATA_COLUMNS,
+            convert: (row: Record<string, unknown>) => convertMnemeRow(row, policy),
+          };
+          const delta = await scanMnemeChanges(
+            capture,
+            previous ? db.readObservations(previous, true) : [],
+          );
+          if (
+            (await sourceBinding(file)) !== binding ||
+            db.getCompleteBatch(source.sourceId, key) !== previous
+          )
+            throw new ZhaoyeError('CONFLICT', '同步期间来源或基线发生变化，请重试');
+          if (!previous || delta.records.length) {
+            const format = previous ? 'mneme-delta/v1' : 'mneme-baseline/v1';
+            const batch = db.startBatch({
+              sourceId: source.sourceId,
+              scopeId: scope,
+              scopeKey: key,
+              scope: policy,
+              operationId: input.operationId,
+              adapterId: adapter,
+              mode: 'live',
+              format,
+              converterVersion: MNEME_CONVERTER_VERSION,
+              inputKey: hashBytes(file),
+            });
+            if (batch.status !== 'running' || !batch.created)
+              throw new ZhaoyeError('CONFLICT', '同步作业已在运行或结束');
+            started = batch.batchId;
+            const manifest = {
+              batchId: batch.batchId,
+              sourceId: source.sourceId,
+              scopeKey: key,
+              format,
+              converterVersion: MNEME_CONVERTER_VERSION,
+              ...(previous ? { parentBatchId: previous } : {}),
+            };
+            const publication = await writeMnemeSync(root, manifest, delta);
+            const receipt = await db.publishBatch(publication);
+            current = receipt.batchId;
+            changed = receipt.recordCount;
+            absent = delta.absentCount;
+            completed = true;
+          }
+          state.checkedAt = new Date().toISOString();
+          state.succeededAt = state.checkedAt;
+          state.batchId = current ?? undefined;
+          state.changed = changed;
+          state.absent = absent;
+          delete state.error;
+          await save();
+        }
+        if (!current) throw new ZhaoyeError('CORRUPT_DATA', '找不到同步基线');
+        if (input.evolve !== false && onPreference) {
+          try {
+            const active = db.getCompleteBatch(source.sourceId, key);
+            const batches = db.listSyncBatches(source.sourceId, key, state.consumedBatchId);
+            if (active && batches.length) {
+              const visible = new Map(
+                db.readObservations(active, true).map((row) => [row.nativeId, row]),
+              );
+              for (const id of batches) {
+                for (const row of db.readObservations(id, false)) {
+                  const latest = visible.get(row.nativeId);
+                  if (
+                    row.content?.kind === 'preference' &&
+                    row.searchAllowed &&
+                    row.visibility === 'visible' &&
+                    latest?.visibility === 'visible' &&
+                    latest.searchAllowed &&
+                    latest.projectId === row.projectId &&
+                    latest.content?.body === row.content.body &&
+                    latest.metadata.source === row.metadata.source
+                  )
+                    await onPreference(source.sourceId, row);
+                }
+                state.consumedBatchId = id;
+                await save();
+              }
+            }
+            delete state.preferenceError;
+          } catch (error) {
+            state.preferenceError = error instanceof ZhaoyeError ? error.code : 'STORAGE_FAILURE';
+          }
+          await save();
+        }
+        return {
+          status: completed ? ('complete' as const) : ('unchanged' as const),
+          sourceId: source.sourceId,
+          batchId: current,
+          changed,
+          absent,
+          preferenceError: state.preferenceError,
+        };
+      } catch (error) {
+        const code = error instanceof ZhaoyeError ? error.code : 'STORAGE_FAILURE';
+        if (started && !completed && code !== 'COMMIT_UNKNOWN') db.failBatch(started, code);
+        state.checkedAt = new Date().toISOString();
+        state.error = code;
+        await save();
+        throw error;
+      }
+    });
   }
   type Options = Pick<BackupSearch, 'projects' | 'includeUnassigned' | 'batchId' | 'history'>;
   function access(db: BackupDb, ctx: ActorContext, sourceId: string, options: Options) {
@@ -165,6 +367,27 @@ export function createBackupFacade(
           policy: { ...policy, file: path },
         });
         return { sourceId, scopeId: scope, rawMode: policy.rawMode };
+      });
+    },
+    syncMneme(
+      input: SyncInput,
+      ctx: ActorContext,
+      onPreference?: (source: string, row: BackupObservation) => Promise<void>,
+    ) {
+      requireWriter(ctx, input.sourceId);
+      if (!input.operationId.trim() || input.operationId.length > 256)
+        throw new ZhaoyeError('INVALID_INPUT', '同步操作 ID 无效');
+      const running = syncing.get(input.sourceId);
+      if (running) return running;
+      const job = sync(input, onPreference).finally(() => syncing.delete(input.sourceId));
+      syncing.set(input.sourceId, job);
+      return job;
+    },
+    syncStatus(sourceId: string, ctx: ActorContext) {
+      authorize(ctx, scope, adapter, sourceId);
+      return withDb(false, async (db) => {
+        const { binding: _binding, ...state } = await syncState(sourceOf(db, sourceId));
+        return { ...state, running: syncing.has(sourceId) };
       });
     },
     async importSnapshot(

@@ -1,8 +1,14 @@
 import { createHash } from 'node:crypto';
 import { constants, createReadStream } from 'node:fs';
-import { copyFile, lstat, mkdir } from 'node:fs/promises';
+import { copyFile, lstat, mkdir, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { type BackupManifest, BackupManifestSchema, ZhaoyeError } from '@zhaoye/contracts';
+import {
+  type BackupManifest,
+  BackupManifestSchema,
+  type PublishBackupBatch,
+  PublishBackupBatchSchema,
+  ZhaoyeError,
+} from '@zhaoye/contracts';
 import { readJson } from '../atomic-fs.js';
 
 export const backupManifestPath = (batchId: string) => `backup/exports/${batchId}/manifest.json`;
@@ -56,4 +62,32 @@ export async function copyBackupArtifacts(
   const files = [relative, join(dirname(relative), manifest.artifact.name)];
   for (const file of files)
     await copyFile(join(root, file), join(destination, file), constants.COPYFILE_EXCL);
+}
+
+export async function readSyncPublication(
+  root: string,
+  manifest: BackupManifest,
+): Promise<PublishBackupBatch> {
+  try {
+    if (manifest.artifact.name !== 'source.ndjson' || manifest.declaredCoverage !== 'complete')
+      throw new Error();
+    const content = await readFile(
+      join(root, dirname(backupManifestPath(manifest.batchId)), manifest.artifact.name),
+      'utf8',
+    );
+    const [header, ...rows] = content.trimEnd().split('\n');
+    const { format, readCount, parentBatchId } = JSON.parse(header ?? '');
+    if (format !== manifest.format || parentBatchId !== manifest.parentBatchId) throw new Error();
+    return PublishBackupBatchSchema.parse({
+      batchId: manifest.batchId,
+      readCount,
+      status: 'complete',
+      rejectedCount: 0,
+      records: rows.map((row) => JSON.parse(row)),
+    });
+  } catch {
+    throw new ZhaoyeError('INTEGRITY_FAILED', '同步差异文件与清单不一致', {
+      batchId: manifest.batchId,
+    });
+  }
 }

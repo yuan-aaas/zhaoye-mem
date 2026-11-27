@@ -16,6 +16,8 @@ const accessFlags = ['project', 'unassigned', 'batch', 'history'];
 const subcommands: Record<string, [number, string[]]> = {
   'source add': [0, ['kind', 'file', 'scope', 'policy', 'source']],
   import: [0, ['source', 'operation-id', 'historical-snapshot']],
+  sync: [0, ['source', 'operation-id']],
+  'sync-status': [0, ['source']],
   batches: [0, ['source', 'project', 'unassigned']],
   search: [1, ['source', ...accessFlags, 'limit', 'cursor', 'from', 'to']],
   record: [1, ['source', ...accessFlags]],
@@ -126,6 +128,13 @@ export async function runBackup(args: string[]) {
           },
           ctx,
         );
+      case 'sync':
+        return await app.backup.syncMneme(
+          { sourceId: source as string, operationId: values['operation-id'] ?? randomUUID() },
+          ctx,
+        );
+      case 'sync-status':
+        return await app.backup.syncStatus(source as string, ctx);
       case 'batches':
         return await app.backup.listImportBatches(source as string, options, ctx);
       case 'search':

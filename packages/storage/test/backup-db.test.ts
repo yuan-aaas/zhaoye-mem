@@ -10,7 +10,13 @@ import type {
   BackupObservation,
   StartBackupBatch,
 } from '@zhaoye/contracts';
-import { ensureDataRoot, hashBytes, openBackupDb, verifyBackupSnapshot } from '@zhaoye/storage';
+import {
+  ensureDataRoot,
+  hashBytes,
+  openBackupDb,
+  verifyBackupSnapshot,
+  writeMnemeSync,
+} from '@zhaoye/storage';
 
 const capturedAt = '2026-11-23T00:00:00.000Z';
 const source = {
@@ -149,6 +155,53 @@ test('MC-2 never migrates an unrelated or unknown SQLite schema', async (t) => {
   } finally {
     raw.close();
   }
+});
+
+test('recovery registers a sealed delta once and preserves its existing baseline', async (t) => {
+  const { connect, root } = await fixture(t);
+  const writer = await connect();
+  const baseline = await publish(writer, root, request, [observation('retained')]);
+  const format = 'mneme-delta/v1';
+  const delta = writer.startBatch({ ...request, format, operationId: 'interrupted' });
+  await writeMnemeSync(
+    root,
+    {
+      batchId: delta.batchId,
+      parentBatchId: baseline.batchId,
+      sourceId: request.sourceId,
+      scopeKey: request.scopeKey,
+      format,
+      converterVersion: request.converterVersion,
+    },
+    {
+      records: [observation('added')],
+      readCount: 2,
+      absentCount: 0,
+      captureStartedAt: capturedAt,
+      capturedAt,
+    },
+  );
+  assert.equal(writer.getCompleteBatch(source.sourceId, request.scopeKey), baseline.batchId);
+  writer.close();
+  const reopened = await connect();
+  await reopened.recoverPendingSyncBatches();
+  await reopened.recoverPendingSyncBatches();
+  const receipt = reopened.getSyncOperation(
+    'interrupted',
+    request.adapterId,
+    source.sourceId,
+    request.scopeKey,
+  );
+  assert.equal(receipt?.status, 'complete');
+  assert.equal(reopened.getCompleteBatch(source.sourceId, request.scopeKey), delta.batchId);
+  assert.deepEqual(
+    reopened
+      .readObservations(delta.batchId, true)
+      .map((row) => row.nativeId)
+      .sort(),
+    ['added', 'retained'],
+  );
+  await reopened.verify();
 });
 
 test('MC-2 operations replay and repeated content links to new batches without new versions', async (t) => {

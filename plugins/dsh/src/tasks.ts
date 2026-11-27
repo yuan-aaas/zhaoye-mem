@@ -145,6 +145,14 @@ export class TaskService {
     this.db.close();
   }
 
+  hasActiveTasks(): boolean {
+    return Boolean(
+      this.db
+        .prepare("SELECT 1 FROM tasks WHERE status IN ('preparing','queued','running') LIMIT 1")
+        .get(),
+    );
+  }
+
   private owned(owner: string, id: string): Task {
     const task = this.db
       .prepare('SELECT * FROM tasks WHERE task_id=? AND owner_session_id=?')

@@ -2,6 +2,7 @@ import type {
   BackupAccess,
   BackupBatchReceipt,
   BackupBatchState,
+  BackupObservation,
   BackupSearchCriteria,
   BackupSource,
   PublishBackupBatch,
@@ -25,7 +26,16 @@ export interface BackupDb {
   publishBatch(input: PublishBackupBatch): Promise<BackupBatchReceipt>;
   failBatch(batchId: string, reason: string): BackupBatchReceipt;
   recoverInterruptedBatches(): number;
+  recoverPendingSyncBatches(): Promise<void>;
   getCompleteBatch(sourceId: string, scopeKey: string): string | null;
+  readObservations(batchId: string, inherited: boolean): BackupObservation[];
+  listSyncBatches(sourceId: string, scopeKey: string, afterBatchId?: string): string[];
+  getSyncOperation(
+    operationId: string,
+    adapterId: string,
+    sourceId: string,
+    scopeKey: string,
+  ): BackupBatchState | null;
   listBatches(access: BackupAccess): BackupBatchSummary[];
   search(access: BackupAccess, input: BackupSearchCriteria): BackupResult;
   readRecords(access: BackupAccess, recordId?: string): BackupDetail[];

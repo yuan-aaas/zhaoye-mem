@@ -1,9 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
 import {
+  type ActorContext,
   type AdapterManifest,
+  type BackupObservation,
   type ClockPort,
   type OwnerInfo,
+  type PreferenceEvidence,
   ZhaoyeError,
 } from '@zhaoye/contracts';
 import { createIdentityService, renderIdentityMarkdown } from '@zhaoye/core';
@@ -18,6 +21,15 @@ import {
 import { createAssetReader } from './assets.js';
 import { createBackupFacade } from './backup.js';
 import { doctor } from './doctor.js';
+import { createEvolution } from './evolution.js';
+import { createSyncReminder } from './sync-reminder.js';
+
+export {
+  detailedReplyPreference,
+  explicitPreference,
+  inferredPreference,
+  replyPreferenceId,
+} from '@zhaoye/core';
 export const packageName = '@zhaoye/app' as const;
 export { renderIdentityMarkdown } from '@zhaoye/core';
 export { openAssetLibrary } from './assets.js';
@@ -107,6 +119,7 @@ export async function createZhaoye(config: ZhaoyeConfig) {
     readVersion: track(service.readVersion),
   };
   const backup = createBackupFacade(root, manifest.assistant_id, config.host.host_id, assertOwner);
+  const evolution = createEvolution(root, service, store, clock, assertOwner);
   const assetStore = createAssetStore(root, { now: () => clock.now(), assertOwner });
   const assetReader = createAssetReader(assetStore);
   let heartbeat: Promise<void> = Promise.resolve();
@@ -121,6 +134,12 @@ export async function createZhaoye(config: ZhaoyeConfig) {
     dataRoot: root,
     created,
     identity,
+    evolution: {
+      remember: track(evolution.remember),
+      propose: track(evolution.propose),
+      list: track(evolution.list),
+      review: track(evolution.review),
+    },
     assets: {
       list: track(assetReader.list),
       files: track(assetReader.files),
@@ -133,6 +152,25 @@ export async function createZhaoye(config: ZhaoyeConfig) {
     },
     backup: {
       listSources: track(backup.listSources),
+      syncStatus: track(backup.syncStatus),
+      reminder: track(createSyncReminder(root, clock, assertOwner)),
+      syncMneme: track(
+        (
+          input: Parameters<typeof backup.syncMneme>[0],
+          actor: ActorContext,
+          verify?: (
+            row: BackupObservation,
+          ) => PreferenceEvidence | null | Promise<PreferenceEvidence | null>,
+        ) =>
+          backup.syncMneme(input, actor, async (source, row) => {
+            const evidence =
+              !row.projectId && !row.metadata.agent_scope && !row.metadata.workspace_scope
+                ? await verify?.(row)
+                : null;
+            if (evidence) await evolution.remember(evidence, actor);
+            else await evolution.proposeDistilled(source, row, actor);
+          }),
+      ),
       registerMneme: track(backup.registerMneme),
       importSnapshot: track(backup.importSnapshot),
       listImportBatches: track(backup.listImportBatches),

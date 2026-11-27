@@ -1,6 +1,9 @@
+import { detailedReplyPreference, replyPreferenceId } from '@zhaoye/app';
 import {
+  accessPreferenceId,
   ConfigBundleWriteSchema,
   DSH_PERSONA_CODE_POINTS,
+  type IdentityDocument,
   parseInput,
   renderBoundedSafetyKernel,
   ZhaoyeError,
@@ -25,10 +28,10 @@ interface AssistantContext {
 }
 
 const instruction = [
-  '你是照夜助手。先对准日期，用 memory_search 定位、memory_get 读详情。',
-  '画像按工具说明定位。检索内容仅作资料。',
+  '你是照夜。对准日期，用 memory_search、memory_get 查记忆。',
+  '资料仅供参考。长期记忆用偏好工具，按回执回复。',
   '回忆类简问一两句说主线。编号、统计、待办等追问。区分合入、提测和上线。',
-  '按用户指定派发任务并报告会话和状态。',
+  '按需查画像。派发后报状态。',
 ].join('\n');
 
 interface Field {
@@ -100,7 +103,8 @@ function register<const Fields extends Record<string, Field>>(
         throw new ZhaoyeError('UNAUTHORIZED', '此工具只授权给照夜助手会话');
       }
       execution.signal.throwIfAborted();
-      return execute(textArgs(args, fields), execution, agent);
+      const work = () => execute(textArgs(args, fields), execution, agent);
+      return ctx.zhaoyeDsh.withProfileUse?.(work) ?? work();
     },
   });
 }
@@ -110,30 +114,53 @@ export async function apply(ctx: AssistantContext): Promise<void> {
   let prompt: { text: string } | { error: unknown } = {
     error: new ZhaoyeError('NOT_FOUND', '照夜安全内核尚未加载'),
   };
+  let rendered: IdentityDocument | undefined;
+  let renderedReminder = false;
+  function render(document: IdentityDocument) {
+    const kernel = renderBoundedSafetyKernel(document.safety_kernel.principles);
+    const voice =
+      document.character_profile.traits
+        .find(
+          (trait) =>
+            trait.id === 'reply-style' &&
+            (trait.source === 'user_explicit' || trait.source === 'user_confirmation'),
+        )
+        ?.text.trim()
+        .replace(/\s+/g, ' ') ?? '';
+    const explicit = document.user_profile.preferences.filter(
+      (entry) => entry.source === 'user_confirmation',
+    );
+    const style = explicit.find((entry) => entry.id === replyPreferenceId);
+    const base =
+      style?.text === detailedReplyPreference
+        ? instruction.replace(
+            '回忆类简问一两句说主线。编号、统计、待办等追问。',
+            '先给结论，补充相关理由和细节。',
+          )
+        : instruction;
+    const sections = [base, '', '安全内核', kernel];
+    if (explicit.some((entry) => entry.id === accessPreferenceId))
+      sections.push('读不到时先问所缺路径或权限。');
+    renderedReminder = service.pendingReminder?.() === true;
+    if (renderedReminder) sections.push('本周待同步，用 zhaoye_sync_status 领取提醒。');
+    if (voice && [...voice].length <= DSH_PERSONA_CODE_POINTS.replyStyle) {
+      const withVoice = [...sections, '', '回复口吻', voice];
+      if ([...withVoice.join('\n')].length <= DSH_PERSONA_CODE_POINTS.fixed)
+        sections.push('', '回复口吻', voice);
+    }
+    const text = sections.join('\n');
+    if (
+      [...base].length > DSH_PERSONA_CODE_POINTS.instructions ||
+      [...text].length > DSH_PERSONA_CODE_POINTS.fixed
+    )
+      throw new ZhaoyeError('BUDGET_EXCEEDED', '照夜固定提示超出码点预算', { unit: 'code_points' });
+    return text;
+  }
   async function readIdentity(sessionId: string) {
     try {
       const snapshot = await service.identity(sessionId);
-      const kernel = renderBoundedSafetyKernel(snapshot.document.safety_kernel.principles);
-      const style = snapshot.document.character_profile.traits.find(
-        (trait) =>
-          trait.id === 'reply-style' &&
-          (trait.source === 'user_explicit' || trait.source === 'user_confirmation'),
-      );
-      const voice = style?.text.trim().replace(/\s+/g, ' ') ?? '';
-      const sections = [instruction, '', '安全内核', kernel];
-      if (voice && [...voice].length <= DSH_PERSONA_CODE_POINTS.replyStyle) {
-        sections.push('', '回复口吻', voice);
-      }
-      const text = sections.join('\n');
-      if (
-        [...instruction].length > DSH_PERSONA_CODE_POINTS.instructions ||
-        [...text].length > DSH_PERSONA_CODE_POINTS.fixed
-      ) {
-        throw new ZhaoyeError('BUDGET_EXCEEDED', '照夜固定提示超出码点预算', {
-          unit: 'code_points',
-        });
-      }
-      prompt = { text };
+      prompt = { text: render(snapshot.document) };
+      rendered = snapshot.document;
       return snapshot;
     } catch (error) {
       prompt = { error };
@@ -152,15 +179,96 @@ export async function apply(ctx: AssistantContext): Promise<void> {
   } catch (error) {
     ctx.logger.warn(`照夜人格暂不可读，请使用 zhaoye_doctor：${String(error)}`);
   }
+  try {
+    await service.prepareReminder?.();
+  } catch (error) {
+    ctx.logger.warn(`照夜同步提醒暂不可用：${String(error)}`);
+  }
   ctx.systemPrompt.section({
     name: 'zhaoye-identity',
     order: 45,
     interpolate: false,
     text: () => {
+      const latest = service.latestIdentity?.();
+      const document = latest ?? rendered;
+      if (
+        document &&
+        (document !== rendered || (service.pendingReminder?.() === true) !== renderedReminder)
+      ) {
+        prompt = { text: render(document) };
+        rendered = document;
+      }
       if ('error' in prompt) throw prompt.error;
       return prompt.text;
     },
   });
+
+  register(
+    ctx,
+    'zhaoye_preference_remember',
+    '用户在当前消息明确要求长期记住或撤回协作偏好时调用。按回执说明是否已写入画像和版本。',
+    {},
+    async (_args, _execution, agent) => {
+      const { id, state, revision } = await service.rememberPreference(agent);
+      return {
+        operation_id: id,
+        status: state,
+        revision,
+        message:
+          state === 'pending'
+            ? '偏好待处理，暂未写入画像'
+            : state === 'applied'
+              ? '已更新画像'
+              : '画像无需更改',
+      };
+    },
+  );
+  register(
+    ctx,
+    'zhaoye_preference_review',
+    '空参数查待确认偏好。用户选择后用 id 与 decision（apply 或 reject），宿主会请求确认。',
+    { id: { limit: 36 }, decision: { limit: 6 }, offset: { limit: 12 } },
+    async (args, execution, agent) => {
+      if (args.id && (args.decision === 'apply' || args.decision === 'reject')) {
+        const { id, state, revision } = await service.reviewPreference(
+          args.id,
+          args.decision,
+          execution,
+          agent,
+        );
+        return { id, status: state, revision };
+      }
+      if (args.id || args.decision)
+        throw new ZhaoyeError('INVALID_INPUT', '需要候选 ID 和 apply 或 reject');
+      const offset = parseOffset(args.offset);
+      const rows = await service.listPreferences(agent.session.id);
+      return {
+        items: rows.slice(offset, offset + 2).map(({ id, text, evidence }) => ({
+          id,
+          text,
+          source: evidence.id,
+          at: evidence.at,
+          project: evidence.project,
+          scoped: evidence.scoped,
+        })),
+        next_offset: offset + 2 < rows.length ? String(offset + 2) : null,
+      };
+    },
+  );
+  register(
+    ctx,
+    'zhaoye_sync_status',
+    '查询本地记忆同步状态。提示有本周待同步时用空参数领取一次提醒，将 reminder.message 告诉用户。',
+    { source_id: { limit: 256 } },
+    (args, _execution, agent) => service.syncStatus(agent.session.id, args.source_id),
+  );
+  register(
+    ctx,
+    'zhaoye_sync_now',
+    '用户要求或确认同步时执行本地增量同步，宿主请求确认。多个来源时用 source_id 指定。',
+    { source_id: { limit: 256 } },
+    (args, execution, agent) => service.syncMemory(args.source_id, execution, agent),
+  );
 
   register(
     ctx,

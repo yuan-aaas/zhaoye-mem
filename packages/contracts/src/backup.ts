@@ -90,6 +90,7 @@ export const BackupManifestSchema = z.strictObject({
   sourceId: id,
   scopeKey: id,
   format: id,
+  parentBatchId: z.uuid().optional(),
   converterVersion: id,
   captureStartedAt: date,
   capturedAt: date,
@@ -136,6 +137,23 @@ export const BackupBatchReceiptSchema = z.strictObject({
   newVersionCount: count,
   absentCount: count,
   previousCompleteBatchId: z.uuid().nullable(),
+});
+export const BackupSyncStateSchema = z.strictObject({
+  binding: BackupSha256Schema.optional(),
+  checkedAt: date.optional(),
+  succeededAt: date.optional(),
+  batchId: z.uuid().optional(),
+  consumedBatchId: z.uuid().optional(),
+  changed: count.optional(),
+  absent: count.optional(),
+  error: id.optional(),
+  preferenceError: id.optional(),
+});
+export type BackupSyncState = z.infer<typeof BackupSyncStateSchema>;
+export const SyncReminderStateSchema = z.strictObject({
+  schedule: id,
+  enabledAt: date,
+  shown: z.iso.date().optional(),
 });
 
 export type BackupSource = z.infer<typeof BackupSourceSchema>;

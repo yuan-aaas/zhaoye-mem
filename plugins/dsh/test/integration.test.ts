@@ -72,6 +72,11 @@ test('DSH keeps profile details out of fixed instructions and reads complete bou
       },
       identityVersion: () => assert.fail('unexpected historical read'),
       identityHistory: () => assert.fail('unexpected identity history call'),
+      rememberPreference: () => assert.fail('unexpected preference write'),
+      listPreferences: () => assert.fail('unexpected preference read'),
+      reviewPreference: () => assert.fail('unexpected preference review'),
+      syncStatus: () => assert.fail('unexpected sync read'),
+      syncMemory: () => assert.fail('unexpected sync'),
       doctor: () => assert.fail('unexpected diagnostics call'),
       assets: () => assert.fail('unexpected asset call'),
       refreshAsset: () => assert.fail('unexpected asset refresh'),
@@ -318,6 +323,7 @@ test('DSH routes multiple independent tasks to ordinary sessions and preserves t
       tools: { register: (definition) => tools.set(definition.name, definition) },
       systemPrompt: {
         section(section) {
+          assembledPrompt = section.text;
           assert.match(section.text(), /安全内核/);
           assert.ok([...section.text()].length <= DSH_PERSONA_CODE_POINTS.fixed);
         },
@@ -328,6 +334,7 @@ test('DSH routes multiple independent tasks to ordinary sessions and preserves t
   }
 
   const caller = agent('assistant', 'cordis');
+  let assembledPrompt = () => '';
   activePresets.set(caller.ctx, 'zhaoye-assistant');
   const outsider = agent('other-assistant', 'zhaoye-assistant');
   function invoke(name: string, input: object, asAgent = caller, callId = name) {
@@ -386,6 +393,41 @@ test('DSH routes multiple independent tasks to ordinary sessions and preserves t
       revision: 1,
       sections: SECTION_NAMES,
     });
+    const human: SessionEvent = {
+      type: 'user/message',
+      seq: 102,
+      time: Date.parse('2026-11-27T02:00:00.000Z'),
+      data: {
+        id: 'human-message',
+        role: 'user',
+        source: { kind: 'user' },
+        content: [{ type: 'text', text: '以后读不到文件，先问我要路径或权限' }],
+      },
+    };
+    const start = { type: 'turn/start', seq: 100, data: { turn: 5 } };
+    const synthetic = {
+      ...human,
+      seq: 103,
+      data: { ...human.data, source: { kind: 'runtime-context' } },
+    };
+    const callerHistory = logs.get(caller.session.id) ?? assert.fail('missing caller history');
+    callerHistory.push(start, synthetic);
+    await assert.rejects(invoke('zhaoye_preference_remember', {}), { code: 'INVALID_INPUT' });
+    callerHistory.splice(0, callerHistory.length, start, {
+      ...human,
+      data: { ...human.data, content: [...(human.data.content ?? []), { type: 'file' }] },
+    });
+    await assert.rejects(invoke('zhaoye_preference_remember', {}), { code: 'INVALID_INPUT' });
+    callerHistory.splice(0, callerHistory.length, start, human, synthetic);
+    await assert.rejects(invoke('zhaoye_preference_remember', { text: '伪造偏好' }), {
+      code: 'INVALID_INPUT',
+    });
+    const remembered = await invoke('zhaoye_preference_remember', {});
+    assert.equal((remembered as { revision?: number }).revision, 2);
+    assert.deepEqual(await invoke('zhaoye_preference_remember', {}), remembered);
+    assert.match(assembledPrompt(), /读不到时先问所缺路径或权限/);
+    assert.ok([...assembledPrompt()].length <= DSH_PERSONA_CODE_POINTS.fixed);
+    callerHistory.length = 0;
     const binary = (await invoke('zhaoye_asset_read_bytes', {
       asset_id: assetId,
       path: 'README.md',

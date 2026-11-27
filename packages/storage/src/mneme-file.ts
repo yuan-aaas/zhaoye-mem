@@ -1,6 +1,7 @@
 import { lstat, mkdir, open, realpath, rename } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
+import { isDeepStrictEqual } from 'node:util';
 import {
   type BackupDetail,
   type BackupManifest,
@@ -11,6 +12,183 @@ import {
 } from '@zhaoye/contracts';
 import { ioError, writeAtomic } from './atomic-fs.js';
 import { fileDigest } from './internal/backup-artifacts.js';
+
+interface MnemeCapture {
+  root: string;
+  file: string;
+  required: readonly string[];
+  optional: readonly string[];
+  convert: (row: Record<string, unknown>) => BackupObservation | 'excluded' | 'invalid';
+}
+type Batch = Pick<
+  BackupManifest,
+  'batchId' | 'sourceId' | 'scopeKey' | 'format' | 'converterVersion' | 'parentBatchId'
+>;
+interface MnemeDelta {
+  records: BackupObservation[];
+  readCount: number;
+  absentCount: number;
+  captureStartedAt: string;
+  capturedAt: string;
+}
+
+async function prepareArtifact(root: string, batchId: string) {
+  if (!BackupManifestSchema.shape.batchId.safeParse(batchId).success)
+    throw new ZhaoyeError('INVALID_INPUT', '批次 ID 无效');
+  const backupRoot = join(await realpath(root), 'backup');
+  for (const path of [join(backupRoot, '.staging'), join(backupRoot, 'exports')]) {
+    await mkdir(path, { recursive: true });
+    if (!(await lstat(path)).isDirectory())
+      throw new ZhaoyeError('STORAGE_FAILURE', '备份目录无效');
+  }
+  const staging = join(backupRoot, '.staging', batchId);
+  const destination = join(backupRoot, 'exports', batchId);
+  await mkdir(staging);
+  return { staging, destination };
+}
+
+async function scanSource(
+  source: DatabaseSync,
+  input: MnemeCapture,
+  accept: (record: BackupObservation, raw: Record<string, unknown>) => void | Promise<void>,
+) {
+  source.exec('BEGIN');
+  if (
+    source.prepare("SELECT type FROM sqlite_schema WHERE name='memories'").get()?.type !== 'table'
+  )
+    throw new ZhaoyeError('SCHEMA_MIGRATION_REQUIRED', '源库缺少 Mneme memories 表');
+  const available = new Set(
+    source
+      .prepare("PRAGMA table_info('memories')")
+      .all()
+      .map((col) => col.name),
+  );
+  const missing = input.required.filter((column) => !available.has(column));
+  if (missing.length)
+    throw new ZhaoyeError('SCHEMA_MIGRATION_REQUIRED', 'Mneme 缺少读取或判断授权范围所需的字段', {
+      missingColumns: missing,
+    });
+  const columns = [
+    ...new Set([...input.required, ...input.optional.filter((column) => available.has(column))]),
+  ];
+  if (columns.some((column) => !/^[a-z_]+$/.test(column)))
+    throw new ZhaoyeError('INVALID_INPUT', 'Mneme 字段选择无效');
+  const projection = columns.map((column) => `"${column}"`).join(', ');
+  const rows = source.prepare(`
+    SELECT ${projection} FROM memories
+    WHERE id IN (SELECT id FROM memories GROUP BY id HAVING count(*)=1)
+  `);
+  const duplicates = Number(
+    source
+      .prepare(`
+    SELECT coalesce(sum(n),0) AS n FROM (SELECT count(*) n FROM memories GROUP BY id HAVING count(*)>1 OR id IS NULL)
+  `)
+      .get()?.n,
+  );
+  let readCount = duplicates;
+  let rejectedCount = duplicates;
+  for (const row of rows.iterate()) {
+    readCount++;
+    const result = input.convert(row);
+    if (result === 'excluded') continue;
+    if (result === 'invalid') rejectedCount++;
+    else {
+      const saved = accept(result, row);
+      if (saved) await saved;
+    }
+  }
+  source.exec('COMMIT');
+  return { readCount, rejectedCount };
+}
+
+export async function scanMnemeChanges(
+  input: MnemeCapture,
+  baseline: BackupObservation[],
+): Promise<MnemeDelta> {
+  const captureStartedAt = new Date().toISOString();
+  const { DatabaseSync } = await import('node:sqlite');
+  const remaining = new Map(baseline.map((row) => [row.nativeId, row]));
+  const records: BackupObservation[] = [];
+  const compare = (row: BackupObservation) => {
+    const { last_accessed_at: _access, ...metadata } = row.metadata;
+    return { ...row, metadata };
+  };
+  let source: DatabaseSync | undefined;
+  try {
+    source = new DatabaseSync(input.file, { readOnly: true, timeout: 3000 });
+    source.exec('PRAGMA query_only=ON; PRAGMA trusted_schema=OFF;');
+    const { readCount, rejectedCount } = await scanSource(source, input, (row) => {
+      const prior = remaining.get(row.nativeId);
+      if (!prior || !isDeepStrictEqual(compare(prior), compare(row))) records.push(row);
+      remaining.delete(row.nativeId);
+    });
+    if (rejectedCount)
+      throw new ZhaoyeError('IMPORT_INCOMPLETE', '源库存在无效或重复记录，无法完成增量对账');
+    let absentCount = 0;
+    for (const prior of remaining.values()) {
+      if (prior.reason === 'source_absent' || prior.visibility === 'deleted') continue;
+      records.push({
+        ...prior,
+        content: null,
+        searchAllowed: false,
+        visibility: 'unavailable',
+        reason: 'source_absent',
+        rawRef: null,
+        metadata: {},
+      });
+      absentCount++;
+    }
+    return {
+      records,
+      readCount: readCount + absentCount,
+      absentCount,
+      captureStartedAt,
+      capturedAt: new Date().toISOString(),
+    };
+  } catch (error) {
+    if (error instanceof ZhaoyeError) throw error;
+    throw new ZhaoyeError('SOURCE_UNAVAILABLE', '无法从 Mneme 文件读取一致的对账视图');
+  } finally {
+    source?.close();
+  }
+}
+
+export async function writeMnemeSync(
+  root: string,
+  batch: Batch,
+  delta: MnemeDelta,
+): Promise<PublishBackupBatch> {
+  const { staging, destination } = await prepareArtifact(root, batch.batchId);
+  const name = 'source.ndjson';
+  const artifactPath = join(staging, name);
+  const output = await open(artifactPath, 'wx');
+  try {
+    await output.writeFile(
+      `${JSON.stringify({ format: batch.format, parentBatchId: batch.parentBatchId, readCount: delta.readCount })}\n`,
+    );
+    for (const record of delta.records) await output.writeFile(`${JSON.stringify(record)}\n`);
+    await output.sync();
+  } finally {
+    await output.close();
+  }
+  const manifest: BackupManifest = {
+    ...batch,
+    captureStartedAt: delta.captureStartedAt,
+    capturedAt: delta.capturedAt,
+    capturedAtKind: 'local',
+    declaredCoverage: 'complete',
+    artifact: { name, ...(await fileDigest(artifactPath)) },
+  };
+  await writeAtomic(join(staging, 'manifest.json'), JSON.stringify(manifest));
+  await rename(staging, destination);
+  return {
+    batchId: batch.batchId,
+    status: 'complete',
+    readCount: delta.readCount,
+    rejectedCount: 0,
+    records: delta.records,
+  };
+}
 
 export async function resolveMnemeFile(
   root: string,
@@ -36,28 +214,13 @@ export async function resolveMnemeFile(
   }
 }
 
-export async function captureMnemeFile(input: {
-  root: string;
-  file: string;
-  whole: boolean;
-  batch: Pick<BackupManifest, 'batchId' | 'sourceId' | 'scopeKey' | 'format' | 'converterVersion'>;
-  required: readonly string[];
-  optional: readonly string[];
-  convert: (row: Record<string, unknown>) => BackupObservation | 'excluded' | 'invalid';
-}): Promise<PublishBackupBatch> {
+export async function captureMnemeFile(
+  input: MnemeCapture & { whole: boolean; batch: Batch },
+): Promise<PublishBackupBatch> {
   const { root, file, batch, whole } = input;
-  if (!BackupManifestSchema.shape.batchId.safeParse(batch.batchId).success)
-    throw new ZhaoyeError('INVALID_INPUT', '批次 ID 无效');
   const { DatabaseSync, backup } = await import('node:sqlite');
   const captureStartedAt = new Date().toISOString();
-  const backupRoot = join(await realpath(root), 'backup');
-  for (const path of [join(backupRoot, '.staging'), join(backupRoot, 'exports')]) {
-    await mkdir(path, { recursive: true });
-    if (!(await lstat(path)).isDirectory())
-      throw new ZhaoyeError('STORAGE_FAILURE', '备份目录无效');
-  }
-  const staging = join(backupRoot, '.staging', batch.batchId);
-  await mkdir(staging);
+  const { staging, destination } = await prepareArtifact(root, batch.batchId);
   const name = whole ? 'source.sqlite' : 'source.ndjson';
   const artifactPath = join(staging, name);
   const read = (path: string) => {
@@ -81,61 +244,20 @@ export async function captureMnemeFile(input: {
       }
       source = read(artifactPath);
     }
-    source.exec('BEGIN');
-    if (
-      source.prepare("SELECT type FROM sqlite_schema WHERE name='memories'").get()?.type !== 'table'
-    )
-      throw new ZhaoyeError('SCHEMA_MIGRATION_REQUIRED', '源库缺少 Mneme memories 表');
-    const available = new Set(
-      source
-        .prepare("PRAGMA table_info('memories')")
-        .all()
-        .map((col) => col.name),
-    );
-    const missing = input.required.filter((column) => !available.has(column));
-    if (missing.length)
-      throw new ZhaoyeError('SCHEMA_MIGRATION_REQUIRED', 'Mneme 缺少读取或判断授权范围所需的字段', {
-        missingColumns: missing,
-      });
-    const columns = [
-      ...new Set([...input.required, ...input.optional.filter((column) => available.has(column))]),
-    ];
-    if (columns.some((column) => !/^[a-z_]+$/.test(column)))
-      throw new ZhaoyeError('INVALID_INPUT', 'Mneme 字段选择无效');
-    const projection = columns.map((column) => `"${column}"`).join(', ');
-    const rows = source.prepare(`
-      SELECT ${projection} FROM memories
-      WHERE id IN (SELECT id FROM memories GROUP BY id HAVING count(*)=1)
-    `);
-    const duplicates = Number(
-      source
-        .prepare(`
-      SELECT coalesce(sum(n),0) AS n FROM (SELECT count(*) n FROM memories GROUP BY id HAVING count(*)>1 OR id IS NULL)
-    `)
-        .get()?.n,
-    );
     const records: BackupObservation[] = [];
-    let readCount = duplicates;
-    let rejectedCount = duplicates;
     const output = whole ? undefined : await open(artifactPath, 'wx');
+    let counts: Awaited<ReturnType<typeof scanSource>>;
     try {
       await output?.writeFile('{"format":"mneme-scoped/v1"}\n');
-      for (const row of rows.iterate()) {
-        readCount++;
-        const result = input.convert(row);
-        if (result === 'excluded') continue;
-        if (result === 'invalid') {
-          rejectedCount++;
-          continue;
-        }
-        records.push(result);
-        await output?.writeFile(`${JSON.stringify(row)}\n`);
-      }
+      counts = await scanSource(source, input, (record, raw) => {
+        records.push(record);
+        return output?.writeFile(`${JSON.stringify(raw)}\n`);
+      });
       await output?.sync();
     } finally {
       await output?.close();
     }
-    source.exec('COMMIT');
+    const { readCount, rejectedCount } = counts;
     source.close();
     source = undefined;
     if (rejectedCount > 0 && records.length === 0)
@@ -151,7 +273,7 @@ export async function captureMnemeFile(input: {
       artifact: { name, ...(await fileDigest(artifactPath)) },
     };
     await writeAtomic(join(staging, 'manifest.json'), JSON.stringify(manifest));
-    await rename(staging, join(backupRoot, 'exports', batch.batchId));
+    await rename(staging, destination);
     return { batchId: batch.batchId, status, readCount, rejectedCount, records };
   } catch (error) {
     if (error instanceof ZhaoyeError) throw error;
